@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ */
+/* Base                                                                */
+/* ------------------------------------------------------------------ */
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-paper text-ink-900 font-sans antialiased;
+}
+
+::selection {
+  background-color: #e8a317;
+  color: #060d1a;
+}
+
+:focus-visible {
+  outline: 2px solid #e8a317;
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Components                                                          */
+/* ------------------------------------------------------------------ */
+
+@layer components {
+  .card {
+    @apply bg-white rounded-2xl border border-ink-900/10 shadow-[0_10px_30px_-15px_rgba(6,13,26,0.25)] p-6;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-ink-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-ink-800 active:scale-[.99] disabled:opacity-50;
+  }
+
+  .btn-gold {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-brand-500 px-5 py-3 text-sm font-semibold text-ink-950 transition hover:bg-brand-400 active:scale-[.99];
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-ink-900/15 bg-white px-4 py-2.5 text-sm text-ink-900 placeholder:text-ink-900/35 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-semibold uppercase tracking-wider text-ink-900/60;
+  }
+
+  .hero-grid {
+    background-color: #060d1a;
+    background-image:
+      radial-gradient(60rem 40rem at 12% -12%, rgba(232, 163, 23, 0.18), transparent 62%),
+      radial-gradient(48rem 34rem at 92% 4%, rgba(20, 184, 166, 0.16), transparent 58%),
+      linear-gradient(180deg, #0a1628 0%, #060d1a 100%);
+    background-repeat: no-repeat;
+    background-size: cover;
+  }
+
+  .hero-grid::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(to right, rgba(246, 244, 238, 0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(246, 244, 238, 0.05) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(70% 70% at 50% 30%, #000 0%, transparent 100%);
+    -webkit-mask-image: radial-gradient(70% 70% at 50% 30%, #000 0%, transparent 100%);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Utilities                                                           */
+/* ------------------------------------------------------------------ */
+
+@layer utilities {
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+}
