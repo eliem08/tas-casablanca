@@ -12,6 +12,11 @@ import DemoSteps from "@/components/DemoSteps";
 import BenchmarkPanel from "@/components/BenchmarkPanel";
 import ReplanPanel from "@/components/ReplanPanel";
 import GateProfiles from "@/components/GateProfiles";
+import ExactPanel from "@/components/ExactPanel";
+import StochasticPanel from "@/components/StochasticPanel";
+import ParetoPanel from "@/components/ParetoPanel";
+import ValidationPanel from "@/components/ValidationPanel";
+import PricingPanel from "@/components/PricingPanel";
 import {
   Container,
   SectionHeading,
@@ -21,7 +26,7 @@ import {
   ErrorNote,
 } from "@/components/ui";
 
-const TRUCKS = 220;
+const TRUCKS = 400;
 const SEED = 42;
 
 export default function DemoPage() {
@@ -93,7 +98,7 @@ export default function DemoPage() {
           align="left"
           eyebrow="Live demo"
           title="Seven operating days at the Port of Casablanca"
-          sub="A discrete-event simulation of 220 trucks per day across 3 gates, over a 7-day rolling horizon. Pick a day, pick an optimizer, toggle the appointment system — and watch congestion respond, the same comparison the ENSEM researchers ran on real port data."
+          sub="A discrete-event simulation of 400 trucks per day across 3 gates, over a 7-day rolling horizon. Demand is set near the congestion threshold on purpose — at 220 trucks/day the gates sit below capacity and any appointment system looks useless, which is a property of queueing, not of TAS. Pick a day, pick an optimizer, toggle the appointment system — and watch congestion respond, the same comparison the ENSEM researchers ran on real port data."
         />
 
         <div className="mt-8">
@@ -384,6 +389,17 @@ export default function DemoPage() {
                   </h3>
                   <ul className="mt-3 space-y-2 text-sm text-ink-900/70">
                     <li>
+                      <strong>Research-grade methods</strong> — exact optima
+                      (branch-and-bound), stochastic planning, Pareto
+                      frontier, Little&apos;s Law validation, congestion
+                      pricing. See below.
+                    </li>
+                    <li>
+                      <strong>Fair comparison</strong> — both worlds now see
+                      the same no-show draws (common random numbers), so the
+                      TAS advantage is scheduling, not a demand artifact.
+                    </li>
+                    <li>
                       <strong>7-day rolling horizon</strong> — plan and
                       simulate a full week, not one day.
                     </li>
@@ -415,6 +431,35 @@ export default function DemoPage() {
 
             <div className="mt-6">
               <ReplanPanel trucks={TRUCKS} seed={SEED} day={day} />
+            </div>
+
+            {/* Research-grade methods */}
+            <div className="mt-10">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-brand-600">
+                    Research-grade methods
+                  </p>
+                  <h2 className="font-display mt-1 text-2xl font-semibold text-ink-950">
+                    Measured against truth, not against each other
+                  </h2>
+                  <p className="mt-1 max-w-2xl text-sm text-ink-900/60">
+                    Exact optima, stochastic planning, Pareto trade-offs,
+                    statistical validation, and a pricing mechanism — each
+                    honest about its guarantee. Full formal statement:{" "}
+                    <Link href="/methodology" className="font-semibold text-brand-600 underline">
+                      Methodology →
+                    </Link>
+                  </p>
+                </div>
+              </div>
+              <div className="mt-6 space-y-6">
+                <ExactPanel seed={SEED} day={day} />
+                <StochasticPanel trucks={TRUCKS} seed={SEED} day={day} />
+                <ParetoPanel trucks={TRUCKS} seed={SEED} day={day} />
+                <ValidationPanel trucks={TRUCKS} seed={SEED} />
+                <PricingPanel trucks={TRUCKS} seed={SEED} day={day} />
+              </div>
             </div>
           </>
         )}
