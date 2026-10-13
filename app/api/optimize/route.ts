@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
-import { optimizeSlots } from "@/lib/optimizer";
-import type { BookingRequest, SlotAssignment } from "@/lib/types";
+import { optimizeSlots, scorePlan } from "@/lib/optimizer";
+import type {
+  BookingRequest,
+  SlotAssignment,
+  OptimizerMethod,
+} from "@/lib/types";
+import { HORIZON_DAYS } from "@/lib/types";
+import { TERMINALS } from "@/lib/data";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +15,8 @@ const OPTIMIZER_SEED = 7;
 
 const CARGOS = ["general", "grain", "reefer", "hazmat"] as const;
 const MOVES = ["import", "export"] as const;
+const METHODS: OptimizerMethod[] = ["greedy", "annealed"];
+const TERMINAL_IDS = [...TERMINALS.map((t) => t.id), "any"] as const;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -49,6 +57,23 @@ function validateRequest(v: unknown, i: number): string | null {
     return `requests[${i}].driverNoShowRate must be between 0 and 1`;
   if (num(v.createdAt) === null)
     return `requests[${i}].createdAt must be a number`;
+  if (v.day !== undefined && v.day !== null) {
+    const d = num(v.day);
+    if (
+      d === null ||
+      !Number.isInteger(d) ||
+      d < 0 ||
+      d >= HORIZON_DAYS
+    )
+      return `requests[${i}].day must be an integer 0..${HORIZON_DAYS - 1}`;
+  }
+  if (v.terminal !== undefined && v.terminal !== null) {
+    if (
+      typeof v.terminal !== "string" ||
+      !(TERMINAL_IDS as readonly string[]).includes(v.terminal)
+    )
+      return `requests[${i}].terminal must be one of ${TERMINAL_IDS.join(", ")}`;
+  }
   return null;
 }
 
@@ -83,22 +108,44 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     const requests = raw as BookingRequest[];
+    // Single-day endpoint: all requests must belong to the same horizon day.
+    const days = new Set(requests.map((r) => r.day ?? 0));
+    if (days.size > 1) {
+      return NextResponse.json(
+        {
+          error:
+            "requests must all belong to the same horizon day (0..6); use one call per day or optimizeHorizon for a full week",
+        },
+        { status: 400 },
+      );
+    }
+    const method: OptimizerMethod =
+      isRecord(body) && METHODS.includes(body.method as OptimizerMethod)
+        ? (body.method as OptimizerMethod)
+        : "greedy";
+
     const assignments: SlotAssignment[] = optimizeSlots(requests, {
       seed: OPTIMIZER_SEED,
       overbook: true,
+      method,
     });
     const rescheduled = assignments.filter((a) => a.rescheduled).length;
     const avgRisk =
       assignments.reduce((s, a) => s + a.noShowProbability, 0) /
       Math.max(1, assignments.length);
+    const score = scorePlan(assignments, requests);
 
     return NextResponse.json({
       assignments,
+      method,
       summary: {
         total: assignments.length,
         rescheduled,
         rescheduleRate: Math.round((rescheduled / Math.max(1, assignments.length)) * 10000) / 10000,
         avgNoShowRisk: Math.round(avgRisk * 10000) / 10000,
+        optimizerCost: Math.round(score.cost * 100) / 100,
+        avgWaitMin: Math.round(score.avgWait * 100) / 100,
+        maxSlotLoad: score.maxLoad,
       },
     });
   } catch (e) {
@@ -112,10 +159,11 @@ export async function POST(request: Request): Promise<NextResponse> {
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({
     description:
-      "Assigns gate/time slots to truck booking requests with a greedy + local-search optimizer. Deterministic (seed 7), overbooking enabled. Times are minutes since midnight.",
+      "Assigns gate/time slots to truck booking requests. Methods: 'greedy' (greedy + local search, default) or 'annealed' (greedy + local search + simulated annealing — never worse than greedy on the shared cost function). Deterministic (seed 7), overbooking enabled. Times are minutes since midnight. All requests in one call must share the same horizon day (0..6).",
     method: "POST",
     body: {
-      requests: "BookingRequest[] (max 500). Required fields per item: id, company, truckPlate, cargo (general|grain|reefer|hazmat), move (import|export), containers (1|2), preferredStart, preferredEnd (minutes since midnight), leadTimeHours, driverNoShowRate (0..1), createdAt.",
+      requests: "BookingRequest[] (max 500). Required fields per item: id, company, truckPlate, cargo (general|grain|reefer|hazmat), move (import|export), containers (1|2), preferredStart, preferredEnd (minutes since midnight), leadTimeHours, driverNoShowRate (0..1), createdAt. Optional: day (0..6, default 0), terminal (T1|T2|T3|any).",
+      method: "'greedy' | 'annealed' (default 'greedy')",
     },
     example: {
       requests: [
@@ -131,12 +179,16 @@ export async function GET(): Promise<NextResponse> {
           leadTimeHours: 24,
           driverNoShowRate: 0.05,
           createdAt: 1,
+          day: 0,
+          terminal: "T1",
         },
       ],
+      method: "annealed",
     },
     response: {
-      assignments: "SlotAssignment[] — gate, slotStart, rescheduled, noShowProbability, waitEstimateMin",
-      summary: "{ total, rescheduled, rescheduleRate, avgNoShowRisk }",
+      assignments: "SlotAssignment[] — gate, slotStart, rescheduled, noShowProbability, waitEstimateMin, day, terminal",
+      method: "Optimizer method used",
+      summary: "{ total, rescheduled, rescheduleRate, avgNoShowRisk, optimizerCost, avgWaitMin, maxSlotLoad }",
     },
   });
 }

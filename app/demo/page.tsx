@@ -2,11 +2,16 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import type { ScenarioResult } from "@/lib/types";
-import { ENSEM_BENCHMARKS } from "@/lib/data";
+import type { ScenarioResult, WeekResult, OptimizerMethod } from "@/lib/types";
+import { HORIZON_DAYS } from "@/lib/types";
+import { ENSEM_BENCHMARKS, horizonDayLabel } from "@/lib/data";
+import { planToCsv, downloadCsv } from "@/lib/csv";
 import QueueChart from "@/components/QueueChart";
 import GateChart from "@/components/GateChart";
 import DemoSteps from "@/components/DemoSteps";
+import BenchmarkPanel from "@/components/BenchmarkPanel";
+import ReplanPanel from "@/components/ReplanPanel";
+import GateProfiles from "@/components/GateProfiles";
 import {
   Container,
   SectionHeading,
@@ -16,37 +21,44 @@ import {
   ErrorNote,
 } from "@/components/ui";
 
+const TRUCKS = 220;
+const SEED = 42;
+
 export default function DemoPage() {
-  const [data, setData] = useState<ScenarioResult | null>(null);
+  const [week, setWeek] = useState<WeekResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [scenario, setScenario] = useState<"on" | "off">("off");
   const [step, setStep] = useState(1);
+  const [day, setDay] = useState(0);
+  const [method, setMethod] = useState<OptimizerMethod>("greedy");
+  const [csvState, setCsvState] = useState<"idle" | "loading" | "error">("idle");
 
   const load = useCallback(async () => {
     setError(null);
-    setData(null);
+    setWeek(null);
     try {
       const res = await fetch("/api/simulate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trucks: 220, seed: 42 }),
+        body: JSON.stringify({ trucks: TRUCKS, seed: SEED, days: HORIZON_DAYS, method }),
       });
       if (!res.ok) throw new Error(`Simulation API returned ${res.status}`);
-      setData(await res.json());
+      setWeek(await res.json());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Simulation failed.");
     }
-  }, []);
+  }, [method]);
 
   useEffect(() => {
     load();
-  }, [load ]);
+  }, [load]);
 
-  const m = scenario === "on" ? data?.optimized : data?.baseline;
-  const other = scenario === "on" ? data?.baseline : data?.optimized;
+  const dayResult: ScenarioResult | undefined = week?.days[day];
+  const m = scenario === "on" ? dayResult?.optimized : dayResult?.baseline;
+  const other = scenario === "on" ? dayResult?.baseline : dayResult?.optimized;
 
   const queueDelta =
-    data && other && m
+    dayResult && other && m
       ? Math.round(
           ((other.maxQueueLength - m.maxQueueLength) /
             Math.max(1, other.maxQueueLength)) *
@@ -54,14 +66,34 @@ export default function DemoPage() {
         )
       : 0;
 
+  async function exportCsv() {
+    setCsvState("loading");
+    try {
+      const res = await fetch("/api/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trucks: TRUCKS, seed: SEED, day, method }),
+      });
+      if (!res.ok) throw new Error(`Plan API returned ${res.status}`);
+      const plan = await res.json();
+      downloadCsv(
+        `tas-casablanca-day-${day + 1}-plan.csv`,
+        planToCsv(plan.assignments, plan.requests),
+      );
+      setCsvState("idle");
+    } catch {
+      setCsvState("error");
+    }
+  }
+
   return (
     <div className="py-12 sm:py-16">
       <Container>
         <SectionHeading
           align="left"
           eyebrow="Live demo"
-          title="One operating day at the Port of Casablanca"
-          sub="A discrete-event simulation of 220 trucks across 3 gates. Toggle the appointment system and watch congestion respond — the same comparison the ENSEM researchers ran on real port data."
+          title="Seven operating days at the Port of Casablanca"
+          sub="A discrete-event simulation of 220 trucks per day across 3 gates, over a 7-day rolling horizon. Pick a day, pick an optimizer, toggle the appointment system — and watch congestion respond, the same comparison the ENSEM researchers ran on real port data."
         />
 
         <div className="mt-8">
@@ -80,11 +112,129 @@ export default function DemoPage() {
             <ErrorNote message={error} onRetry={load} />
           </div>
         )}
-        {!data && !error && <LoadingSpinner label="Simulating the operating day…" />}
+        {!week && !error && <LoadingSpinner label="Simulating the 7-day horizon…" />}
 
-        {data && m && (
+        {week && dayResult && m && (
           <>
-            <div className="mt-8 flex flex-wrap items-center justify-between gap-4">
+            {/* Day selector + method toggle */}
+            <div className="mt-8 flex flex-wrap items-center gap-4">
+              <div
+                role="tablist"
+                aria-label="Horizon day"
+                className="inline-flex flex-wrap rounded-2xl border border-ink-900/10 bg-white p-1.5 shadow-sm"
+              >
+                {week.days.map((d, i) => (
+                  <button
+                    key={i}
+                    role="tab"
+                    aria-selected={day === i}
+                    onClick={() => setDay(i)}
+                    className={`rounded-xl px-3 py-2 text-sm font-semibold transition sm:px-4 ${
+                      day === i
+                        ? "bg-ink-900 text-white shadow"
+                        : "text-ink-900/55 hover:text-ink-900"
+                    }`}
+                  >
+                    Day {i + 1}
+                    <span className="ml-1 hidden text-xs font-normal opacity-70 sm:inline">
+                      {horizonDayLabel(i)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              <div
+                role="tablist"
+                aria-label="Optimizer method"
+                className="inline-flex rounded-2xl border border-ink-900/10 bg-white p-1.5 shadow-sm"
+              >
+                {(["greedy", "annealed"] as OptimizerMethod[]).map((mm) => (
+                  <button
+                    key={mm}
+                    role="tab"
+                    aria-selected={method === mm}
+                    onClick={() => setMethod(mm)}
+                    className={`rounded-xl px-4 py-2 text-sm font-semibold capitalize transition ${
+                      method === mm
+                        ? "bg-brand-500 text-white shadow"
+                        : "text-ink-900/55 hover:text-ink-900"
+                    }`}
+                  >
+                    {mm === "greedy" ? "Greedy" : "Sim. annealing"}
+                  </button>
+                ))}
+              </div>
+              <p className="text-sm text-ink-900/55">
+                Deterministic · seed {SEED} · {TRUCKS} trucks/day ·{" "}
+                <span className="tnum font-semibold text-ink-900">
+                  {scenario === "on" ? "appointments enforced" : "walk-ins welcome"}
+                </span>
+              </p>
+            </div>
+
+            {/* Horizon totals */}
+            <div className="card mt-6">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-brand-600">
+                    7-day horizon totals
+                  </p>
+                  <h3 className="font-display mt-1 text-xl font-semibold text-ink-950">
+                    The whole week, not just one day
+                  </h3>
+                </div>
+                <button
+                  onClick={exportCsv}
+                  disabled={csvState === "loading"}
+                  className="rounded-xl border border-ink-900/15 px-4 py-2 text-sm font-semibold text-ink-900 transition hover:border-ink-900/30 disabled:opacity-50"
+                >
+                  {csvState === "loading"
+                    ? "Building CSV…"
+                    : `↓ Export day ${day + 1} plan (CSV)`}
+                </button>
+              </div>
+              {csvState === "error" && (
+                <p className="mt-2 text-sm font-medium text-red-700">
+                  CSV export failed — please try again.
+                </p>
+              )}
+              <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="rounded-xl bg-paper p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-ink-900/50">
+                    Trucks planned
+                  </p>
+                  <p className="tnum font-display mt-1 text-2xl font-bold">
+                    {week.horizon.totalTrucks.toLocaleString()}
+                  </p>
+                </div>
+                <div className="rounded-xl bg-paper p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-ink-900/50">
+                    CO₂ saved vs status quo
+                  </p>
+                  <p className="tnum font-display mt-1 text-2xl font-bold">
+                    {week.horizon.co2SavedTonnes.toFixed(1)} t
+                  </p>
+                </div>
+                <div className="rounded-xl bg-paper p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-ink-900/50">
+                    Avg wait (week)
+                  </p>
+                  <p className="tnum font-display mt-1 text-2xl font-bold">
+                    {week.horizon.avgWaitBaseline.toFixed(0)} →{" "}
+                    {week.horizon.avgWaitOptimized.toFixed(0)} min
+                  </p>
+                </div>
+                <div className="rounded-xl bg-paper p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-ink-900/50">
+                    Rescheduled (week)
+                  </p>
+                  <p className="tnum font-display mt-1 text-2xl font-bold">
+                    {(week.horizon.rescheduleRate * 100).toFixed(1)}%
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
               <ScenarioToggle
                 value={scenario}
                 onChange={(v) => {
@@ -93,10 +243,8 @@ export default function DemoPage() {
                 }}
               />
               <p className="text-sm text-ink-900/55">
-                Deterministic scenario · seed 42 · 220 trucks ·{" "}
-                <span className="tnum font-semibold text-ink-900">
-                  {scenario === "on" ? "appointments enforced" : "walk-ins welcome"}
-                </span>
+                Showing <strong>{horizonDayLabel(day)}</strong> · optimizer:{" "}
+                <strong className="capitalize">{method}</strong>
               </p>
             </div>
 
@@ -117,9 +265,9 @@ export default function DemoPage() {
                 value={`${m.avgWaitMin.toFixed(0)} min`}
                 sub="Mean time a truck spends queuing."
                 delta={
-                  data
+                  dayResult
                     ? `${(
-                        data.baseline.avgWaitMin - data.optimized.avgWaitMin
+                        dayResult.baseline.avgWaitMin - dayResult.optimized.avgWaitMin
                       ).toFixed(0)} min saved per truck`
                     : undefined
                 }
@@ -137,9 +285,9 @@ export default function DemoPage() {
                 value={`${m.co2Tonnes.toFixed(2)} t`}
                 sub="Diesel burned while waiting, this simulated day."
                 delta={
-                  data
+                  dayResult
                     ? `−${(
-                        data.baseline.co2Tonnes - data.optimized.co2Tonnes
+                        dayResult.baseline.co2Tonnes - dayResult.optimized.co2Tonnes
                       ).toFixed(2)} t vs status quo`
                     : undefined
                 }
@@ -150,14 +298,14 @@ export default function DemoPage() {
             <div className="mt-6 grid gap-5 lg:grid-cols-5">
               <div className="lg:col-span-3">
                 <QueueChart
-                  data={data.baseline.queueSeries}
+                  data={dayResult.baseline.queueSeries}
                   showOptimized={scenario === "on"}
                 />
               </div>
               <div className="lg:col-span-2">
                 <GateChart
-                  baseline={data.baseline.gateUtilization}
-                  optimized={data.optimized.gateUtilization}
+                  baseline={dayResult.baseline.gateUtilization}
+                  optimized={dayResult.optimized.gateUtilization}
                   showOptimized={scenario === "on"}
                 />
               </div>
@@ -195,7 +343,7 @@ export default function DemoPage() {
                     Rescheduled
                   </p>
                   <p className="tnum font-display mt-1 text-2xl font-bold text-ink-950">
-                    {(data.optimized.rescheduleRate * 100).toFixed(1)}%
+                    {(dayResult.optimized.rescheduleRate * 100).toFixed(1)}%
                     <span className="ml-2 text-sm font-medium text-ink-900/50">
                       vs {ENSEM_BENCHMARKS.reschedulePct}% (ENSEM)
                     </span>
@@ -206,7 +354,7 @@ export default function DemoPage() {
                     CO₂ saved today
                   </p>
                   <p className="tnum font-display mt-1 text-2xl font-bold text-ink-950">
-                    {(data.baseline.co2Tonnes - data.optimized.co2Tonnes).toFixed(2)} t
+                    {(dayResult.baseline.co2Tonnes - dayResult.optimized.co2Tonnes).toFixed(2)} t
                     <span className="ml-2 text-sm font-medium text-ink-900/50">
                       scales toward {ENSEM_BENCHMARKS.co2SavedTonnesPerYear} t/yr
                     </span>
@@ -214,11 +362,59 @@ export default function DemoPage() {
                 </div>
               </div>
               <p className="mt-4 text-xs leading-relaxed text-ink-900/50">
-                Demo figures are simulated on synthetic demand (seed 42); ENSEM
-                figures are the researchers&apos; reported results on real port
-                data. The demo echoes their shape — it does not reproduce their
-                study.
+                Demo figures are simulated on synthetic demand (seed {SEED});
+                ENSEM figures are the researchers&apos; reported results on
+                real port data. The demo echoes their shape — it does not
+                reproduce their study.
               </p>
+            </div>
+
+            <div className="mt-6">
+              <BenchmarkPanel trucks={TRUCKS} seed={SEED} day={day} />
+            </div>
+
+            <div className="mt-6 grid gap-5 lg:grid-cols-5">
+              <div className="lg:col-span-3">
+                <GateProfiles />
+              </div>
+              <div className="lg:col-span-2">
+                <div className="card">
+                  <h3 className="font-display text-lg font-semibold text-ink-950">
+                    What&apos;s new in this version
+                  </h3>
+                  <ul className="mt-3 space-y-2 text-sm text-ink-900/70">
+                    <li>
+                      <strong>7-day rolling horizon</strong> — plan and
+                      simulate a full week, not one day.
+                    </li>
+                    <li>
+                      <strong>Simulated annealing</strong> — a second
+                      optimizer that provably never loses to greedy.
+                    </li>
+                    <li>
+                      <strong>Live replanning</strong> — mark trucks late or
+                      no-show and re-optimize the rest of the day.
+                    </li>
+                    <li>
+                      <strong>Per-gate service model</strong> — express,
+                      standard, and inspection lanes with real rate
+                      differences.
+                    </li>
+                    <li>
+                      <strong>CSV export</strong> — download the day plan
+                      for dispatchers and TOS import.
+                    </li>
+                  </ul>
+                  <p className="mt-4 text-xs leading-relaxed text-ink-900/50">
+                    See the README for algorithms, API docs, and honest
+                    limitations.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6">
+              <ReplanPanel trucks={TRUCKS} seed={SEED} day={day} />
             </div>
           </>
         )}

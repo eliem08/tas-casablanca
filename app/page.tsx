@@ -5,19 +5,19 @@ import { PORT_FACTS, ENSEM_BENCHMARKS } from "@/lib/data";
 const PILLARS = [
   {
     title: "Appointment scheduling",
-    body: "Every truck gets a 30-minute window at a specific gate. The morning rush is spread across the whole operating day instead of crushing three gates at 8am.",
+    body: "Every truck gets a 30-minute window at a specific gate, on a specific day of a 7-day rolling horizon. The morning rush is spread across the whole operating week instead of crushing three gates at 8am.",
   },
   {
     title: "Slot optimization",
-    body: "A greedy + local-search allocator packs bookings to minimize peak queue, reschedules, and waiting time — respecting each carrier's preferred window.",
+    body: "A greedy + local-search allocator, upgraded with simulated annealing that provably never loses to greedy. It packs bookings to minimize peak queue, reschedules, and waiting time — respecting each carrier's preferred window, terminal, and gate service rates.",
   },
   {
     title: "No-show-aware overbooking",
     body: "A transparent risk model scores every booking (lead time, carrier history, night slots, cargo) so expected gaps are overbooked instead of leaving gate capacity idle.",
   },
   {
-    title: "Live congestion analytics",
-    body: "Queue curves, gate utilization, reschedule rate and CO₂ — computed live from a discrete-event simulation of the operating day.",
+    title: "Live replanning + congestion analytics",
+    body: "Trucks go late or no-show — the dispatcher re-optimizes the rest of the day around frozen confirmed slots. Queue curves, gate utilization, reschedule rate and CO₂ come from a discrete-event simulation of the full horizon.",
   },
 ];
 
@@ -30,7 +30,7 @@ const STEPS = [
   {
     n: "02",
     title: "The optimizer assigns",
-    body: "Each request is placed on the least-loaded gate and slot inside its preferred window, with intelligent overbooking driven by no-show risk.",
+    body: "Each request is placed on the least-loaded gate and slot inside its preferred window and day, with intelligent overbooking driven by no-show risk — and annealing on top that never loses to greedy.",
   },
   {
     n: "03",

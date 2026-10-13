@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import type { BookingRequest, SlotAssignment } from "@/lib/types";
 import { minutesToHHMM } from "@/lib/types";
-import { TERMINAL_BY_GATE } from "@/lib/data";
+import { TERMINAL_BY_GATE, horizonDayLabel } from "@/lib/data";
 import { riskBand } from "@/lib/predictor";
 import BookingForm from "@/components/BookingForm";
 import { Container, SectionHeading } from "@/components/ui";
@@ -26,12 +26,13 @@ function ResultPanel({
 }) {
   const band = riskBand(assignment.noShowProbability);
   const terminal = TERMINAL_BY_GATE[assignment.gate];
+  const day = assignment.day ?? req.day ?? 0;
   return (
     <div className="card border-sea-700/30">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-xs font-bold uppercase tracking-[0.18em] text-sea-700">
-            Slot confirmed
+            Slot confirmed · Day {day + 1} — {horizonDayLabel(day)}
           </p>
           <h3 className="font-display mt-1 text-2xl font-bold text-ink-950">
             {minutesToHHMM(assignment.slotStart)} · {terminal.name}
@@ -124,7 +125,7 @@ export default function BookPage() {
           align="left"
           eyebrow="Carrier booking"
           title="Request your gate slot"
-          sub="Fill in the booking as a trucking company. The optimizer assigns the least-loaded gate and slot inside your window — and scores the no-show risk that drives intelligent overbooking."
+          sub="Pick a day in the 7-day horizon and a terminal. The optimizer assigns the least-loaded gate and slot inside your window — and scores the no-show risk that drives intelligent overbooking."
         />
         <div className="mx-auto mt-10 max-w-3xl">
           {result ? (

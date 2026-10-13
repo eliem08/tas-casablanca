@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
-import { simulateDay } from '@/lib/simulation';
-import type { ScenarioResult } from '@/lib/types';
+import { simulateDay, simulateWeek } from '@/lib/simulation';
+import type { ScenarioResult, OptimizerMethod } from '@/lib/types';
+import { HORIZON_DAYS } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -8,6 +9,7 @@ const DEFAULT_TRUCKS = 220;
 const MIN_TRUCKS = 20;
 const MAX_TRUCKS = 600;
 const DEFAULT_SEED = 42;
+const METHODS: OptimizerMethod[] = ['greedy', 'annealed'];
 
 interface SimulateDocs {
   description: string;
@@ -93,8 +95,18 @@ export async function POST(request: Request): Promise<NextResponse> {
 
     const trucks = clamp(Math.trunc(rawTrucks ?? DEFAULT_TRUCKS), MIN_TRUCKS, MAX_TRUCKS);
     const seed = Math.trunc(rawSeed ?? DEFAULT_SEED);
+    const rawDays = readFiniteNumber(source, 'days');
+    const days = clamp(Math.trunc(rawDays ?? 1), 1, HORIZON_DAYS);
+    const method: OptimizerMethod =
+      typeof source.method === 'string' && METHODS.includes(source.method as OptimizerMethod)
+        ? (source.method as OptimizerMethod)
+        : 'greedy';
 
-    const result: ScenarioResult = simulateDay(trucks, seed);
+    if (days > 1) {
+      return NextResponse.json(simulateWeek(trucks, seed, days, method), { status: 200 });
+    }
+
+    const result: ScenarioResult = simulateDay(trucks, seed, { method });
 
     return NextResponse.json(result, { status: 200 });
   } catch (error) {
@@ -106,7 +118,7 @@ export async function POST(request: Request): Promise<NextResponse> {
 export async function GET(): Promise<NextResponse> {
   const docs: SimulateDocs = {
     description:
-      'Runs a deterministic single-day yard/dock simulation for a given number of trucks and a random seed. Truck count defaults to 220 and is clamped to the range 20..600. Seed defaults to 42. The response is a full ScenarioResult describing throughput, waiting times, utilization and queue behaviour for the simulated day.',
+      'Runs a deterministic simulation for a given number of trucks and a random seed. days=1 (default) returns a single-day ScenarioResult (baseline vs optimized). days=2..7 returns a WeekResult: one ScenarioResult per horizon day plus aggregated horizon totals. method selects the optimizer used for the optimized world: greedy (default) or annealed (greedy + local search + simulated annealing).',
     params: {
       trucks: {
         type: 'number',
@@ -114,7 +126,7 @@ export async function GET(): Promise<NextResponse> {
         default: DEFAULT_TRUCKS,
         min: MIN_TRUCKS,
         max: MAX_TRUCKS,
-        description: 'Number of trucks to simulate for the day. Clamped to 20..600.',
+        description: 'Number of trucks to simulate per day. Clamped to 20..600.',
       },
       seed: {
         type: 'number',
