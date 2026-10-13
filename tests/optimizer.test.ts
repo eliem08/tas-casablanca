@@ -5,9 +5,26 @@ import {
   baselineAssign,
   loadBySlot,
   slotsPerDay,
-  SLOT_CAPACITY,
 } from "../lib/optimizer";
-import { DAY_START_MIN, DAY_END_MIN } from "../lib/types";
+import { DAY_START_MIN, DAY_END_MIN, capacityForGate } from "../lib/types";
+import type { BookingRequest, GateId } from "../lib/types";
+
+function singleRequest(over: Partial<BookingRequest> = {}): BookingRequest {
+  return {
+    id: "REQ-TEST-1",
+    company: "Atlas Freight Maroc",
+    truckPlate: "48213 - A - 6",
+    cargo: "general",
+    move: "import",
+    containers: 1,
+    preferredStart: 480,
+    preferredEnd: 600,
+    leadTimeHours: 24,
+    driverNoShowRate: 0.05,
+    createdAt: 1,
+    ...over,
+  };
+}
 
 describe("optimizeSlots", () => {
   it("assigns every request exactly once", () => {
@@ -23,12 +40,25 @@ describe("optimizeSlots", () => {
     expect(baselineAssign([])).toEqual([]);
   });
 
-  it("respects per-slot capacity without overbooking", () => {
+  it("respects per-gate slot capacity without overbooking", () => {
     const reqs = generateDayRequests(200, 21);
     const out = optimizeSlots(reqs, { seed: 21, overbook: false });
-    for (const [, load] of loadBySlot(out)) {
-      expect(load).toBeLessThanOrEqual(SLOT_CAPACITY);
+    for (const [key, load] of loadBySlot(out)) {
+      const gate = Number(key.split(":")[0]) as GateId;
+      expect(load).toBeLessThanOrEqual(capacityForGate(gate));
     }
+  });
+
+  it("honours a terminal preference when capacity allows", () => {
+    const out = optimizeSlots([singleRequest({ terminal: "T2" })], { seed: 1 });
+    expect(out).toHaveLength(1);
+    expect(out[0].gate).toBe(1);
+    expect(out[0].terminal).toBe("T2");
+  });
+
+  it("carries the horizon day onto assignments", () => {
+    const out = optimizeSlots([singleRequest({ day: 3 })], { seed: 1 });
+    expect(out[0].day).toBe(3);
   });
 
   it("keeps all slots on the time grid within the operating day", () => {

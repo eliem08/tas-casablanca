@@ -1,11 +1,20 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { BookingRequest, SlotAssignment, CargoType, MoveType } from "@/lib/types";
+import type {
+  BookingRequest,
+  SlotAssignment,
+  CargoType,
+  MoveType,
+  TerminalId,
+} from "@/lib/types";
+import { HORIZON_DAYS } from "@/lib/types";
 import {
   TRUCKING_COMPANIES,
   CARGO_META,
   CARGO_TYPES,
+  TERMINALS,
+  horizonDayLabel,
   makeRng,
   randomPlate,
 } from "@/lib/data";
@@ -43,6 +52,8 @@ export default function BookingForm({
   const [cargo, setCargo] = useState<CargoType>("general");
   const [move, setMove] = useState<MoveType>("import");
   const [containers, setContainers] = useState<1 | 2>(1);
+  const [day, setDay] = useState(0);
+  const [terminal, setTerminal] = useState<TerminalId | "any">("any");
   const [winStart, setWinStart] = useState("08:00");
   const [winEnd, setWinEnd] = useState("10:00");
   const [leadTime, setLeadTime] = useState(24);
@@ -89,6 +100,8 @@ export default function BookingForm({
         leadTimeHours: leadTime,
         driverNoShowRate: history,
         createdAt: Date.now(),
+        day,
+        terminal,
       };
       const res = await fetch("/api/optimize", {
         method: "POST",
@@ -112,7 +125,46 @@ export default function BookingForm({
 
   return (
     <form onSubmit={submit} className="card space-y-5">
+      {/* Day + terminal: the rolling-horizon booking surface */}
+      <div>
+        <span className="label">Operating day (7-day horizon)</span>
+        <div className="flex flex-wrap gap-2">
+          {Array.from({ length: HORIZON_DAYS }, (_, d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => setDay(d)}
+              className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${
+                day === d
+                  ? "border-ink-900 bg-ink-900 text-white"
+                  : "border-ink-900/15 bg-white text-ink-900/60 hover:border-ink-900/30"
+              }`}
+            >
+              Day {d + 1}
+              <span className="ml-1 text-xs font-normal opacity-70">
+                {horizonDayLabel(d)}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label className="label" htmlFor="terminal">Terminal</label>
+          <select
+            id="terminal"
+            className="input"
+            value={terminal}
+            onChange={(e) => setTerminal(e.target.value as TerminalId | "any")}
+          >
+            <option value="any">Any terminal (optimizer picks)</option>
+            {TERMINALS.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.id} · {t.name} (Gate {t.gate + 1})
+              </option>
+            ))}
+          </select>
+        </div>
         <div>
           <label className="label" htmlFor="company">Trucking company</label>
           <select
