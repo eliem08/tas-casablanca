@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { simulateDay } from "../lib/simulation";
+import { simulateDay, buildArrivalStreams } from "../lib/simulation";
+import { generateDayRequests, makeRng } from "../lib/data";
+import { optimizeSlots, baselineAssign } from "../lib/optimizer";
 
 describe("simulateDay", () => {
   it("returns baseline and optimized metrics with a merged queue series", () => {
@@ -48,5 +50,23 @@ describe("simulateDay", () => {
       expect(r.baseline.totalTrucks).toBeGreaterThan(0);
       expect(r.optimized.totalTrucks).toBe(n);
     }
+  });
+
+  it("applies the same no-show set to both worlds (paired comparison)", () => {
+    // Common random numbers: baseline arrivals = TAS arrivals + walk-in
+    // surge. The two worlds differ by scheduling + surge, never by the
+    // no-show draw — otherwise the TAS-vs-baseline comparison would be
+    // confounded by different realized demand.
+    const reqs = generateDayRequests(220, 42);
+    const opt = optimizeSlots(reqs, { seed: 42 });
+    const base = baselineAssign(reqs);
+    const { optArrivals, baseArrivals, surge } = buildArrivalStreams(
+      reqs,
+      opt,
+      base,
+      makeRng(42),
+    );
+    expect(baseArrivals.length).toBe(optArrivals.length + surge);
+    expect(surge).toBe(Math.round(220 * 0.12));
   });
 });

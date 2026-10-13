@@ -49,10 +49,13 @@ describe("multi-day rolling horizon", () => {
   });
 
   it("simulateWeek aggregates 7 days with consistent totals", () => {
-    const week = simulateWeek(100, 42, 7, "greedy");
+    // 400 trucks/day: near the congestion threshold, where TAS actually
+    // reduces waiting. At 100/day the gates sit below capacity and the
+    // comparison is noise (both round to the same wait).
+    const week = simulateWeek(400, 42, 7, "greedy");
     expect(week.days).toHaveLength(7);
     expect(week.horizon.days).toBe(7);
-    expect(week.horizon.totalTrucks).toBe(700);
+    expect(week.horizon.totalTrucks).toBe(2800);
     expect(week.horizon.co2SavedTonnes).toBeGreaterThanOrEqual(0);
     expect(week.horizon.avgWaitOptimized).toBeLessThan(week.horizon.avgWaitBaseline);
     const sumCo2 = week.days.reduce((s, r) => s + r.optimized.co2Tonnes, 0);
