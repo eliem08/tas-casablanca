@@ -38,11 +38,48 @@ A Moroccan research team (ENSEM Casablanca) modeled a **dynamic truck appointmen
 
 ## What this app does
 
-- **Slot booking** (`/book`) — trucking companies request pickup/delivery windows; the optimizer assigns a gate + 30-minute slot, predicts no-show risk, and flags reschedules.
-- **Optimization engine** (`lib/optimizer.ts`) — greedy assignment plus local-search improvement minimizing peak slot load, reschedules, and waiting time. A first-come-first-served baseline is computed for comparison.
+- **Slot booking** (`/book`) — trucking companies pick a day in the 7-day rolling horizon and a terminal, then request pickup/delivery windows; the optimizer assigns a gate + 30-minute slot, predicts no-show risk, and flags reschedules.
+- **Optimization engine** (`lib/optimizer.ts`) — greedy assignment plus local-search improvement, **upgraded with simulated annealing** (`lib/annealer.ts`) that provably never loses to greedy on the shared cost function. A first-come-first-served baseline is computed for comparison.
+- **Multi-day rolling horizon** — bookings, optimization, and simulation all run across 7 days (`lib/data.ts` `generateWeekRequests`, `lib/optimizer.ts` `optimizeHorizon`, `lib/simulation.ts` `simulateWeek`). Days share no capacity — each day has its own slots — so the horizon plan is one optimized day-plan per day, plus week totals.
+- **Live replanning** (`lib/replan.ts`) — the day is running and trucks go late or no-show: the dispatcher marks disruptions, confirmed slots freeze, and the rest of the day is re-optimized. The UI shows exactly what moved.
+- **Per-gate service model** — gates are not interchangeable: Express (4 min/truck, 7 per slot), Standard (5 min, 6 per slot), Inspection (8 min, 3 per slot). The optimizer and the queue simulation both use these rates; bookings name a terminal and the optimizer prefers that terminal's gate.
+- **CSV export** (`lib/csv.ts`) — download the day plan (slot, truck, gate, terminal, window, status) for dispatchers and TOS import.
 - **No-show prediction** (`lib/predictor.ts`) — a transparent heuristic scoring function (lead time, driver history, night slots, cargo type) driving intelligent overbooking. **This is a heuristic, not the LSTM-Transformer arrival model from the literature** — the code and docs say so wherever it matters.
-- **Live dashboard** (`/demo`) — queue-length curves (baseline vs optimized), gate utilization, reschedule rate, CO₂ estimate, and a TAS ON/OFF scenario toggle.
+- **Live dashboard** (`/demo`) — day selector, optimizer-method toggle (greedy vs annealing), horizon totals, queue-length curves (baseline vs optimized), gate utilization, reschedule rate, CO₂ estimate, a TAS ON/OFF scenario toggle, a greedy-vs-annealing benchmark panel, the gate service model, and the live-replanning panel.
 - **Marketing landing page** (`/`) — the pitch: problem, evidence, ROI.
+
+## Algorithms
+
+### Slot optimization — greedy + local search + simulated annealing
+
+All three stages share one cost function (`totalCost` in `lib/optimizer.ts`):
+
+```
+cost = 10 × peak slot load + 3 × rescheduled + 2 × terminal mismatches + 0.5 × total wait
+```
+
+1. **Greedy:** earliest preferred start first; each truck takes the lowest-cost feasible gate/slot (load + reschedule penalty + terminal penalty), respecting per-gate capacity (and overbooking, when enabled).
+2. **Local search:** 250 random single-truck reassignments, accepted only on strict cost improvement.
+3. **Simulated annealing** (`lib/annealer.ts`, 2,500 moves, geometric cooling 6 → 0.02): random single-truck moves, uphill moves accepted with probability exp(−Δ/T). The best state seen is always kept — annealing starts from the greedy solution, so **it can never score worse than greedy** (asserted in `tests/annealer.test.ts`).
+
+Per-gate capacity: a slot holds `floor(30 / serviceMin)` trucks — 7 express, 6 standard, 3 inspection. Overbooking inflates capacity by the expected no-show factor (capped at 2×).
+
+### Live replanning (`lib/replan.ts`)
+
+1. **Freeze** assignments whose slot starts before `now` — confirmed, never moved.
+2. **Drop** no-shows — their slot is freed.
+3. **Re-insert** late trucks with a window starting at `max(now, old slot + delay)` — never in the past.
+4. **Re-optimize** the remaining unserved trucks with frozen slots as blocked capacity and an earliest-slot constraint at `now`.
+
+The result reports moved trucks, freed slots, and before/after scores on the shared cost function.
+
+### Queue simulation (`lib/simulation.ts`)
+
+5-minute discrete-event steps, one FIFO queue per gate. Each gate serves at its own rate via a service-credit accumulator (credit grows by `5 / serviceMin` per step; a truck is served once credit ≥ 1). Baseline world: wide arrival jitter + 12% unannounced morning walk-ins. TAS world: tight arrivals around assigned slots, minus modeled no-shows.
+
+### No-show heuristic (`lib/predictor.ts`)
+
+Logistic-style hand-tuned score (lead time, driver history, night slots, cargo) — priors, not fitted parameters. See the file header for the honest methodology note.
 
 ## Architecture
 
@@ -53,21 +90,35 @@ flowchart LR
         L --> B[Booking /book]
         D --> C1[QueueChart]
         D --> C2[GateChart]
+        D --> C3[BenchmarkPanel]
+        D --> C4[ReplanPanel]
+        D --> C5[GateProfiles]
         B --> F[BookingForm]
     end
     subgraph API [API Routes]
         O[POST /api/optimize]
         S[POST /api/simulate]
+        P[POST /api/plan]
+        BM[POST /api/benchmark]
+        R[POST /api/replan]
     end
     subgraph CORE [lib/ — pure TypeScript]
-        OPT[optimizer.ts<br/>greedy + local search]
+        OPT[optimizer.ts<br/>greedy + local search + SA]
+        ANN[annealer.ts<br/>generic SA engine]
+        REP[replan.ts<br/>live replanning]
+        CSV[csv.ts<br/>day-plan export]
         PRE[predictor.ts<br/>no-show heuristic]
-        SIM[simulation.ts<br/>discrete-event day sim]
+        SIM[simulation.ts<br/>discrete-event week sim]
         DAT[data.ts<br/>seed data + PRNG]
     end
     F --> O --> OPT
     D --> S --> SIM
+    D --> P --> OPT
+    D --> BM --> OPT
+    D --> R --> REP
+    REP --> OPT
     SIM --> OPT
+    OPT --> ANN
     OPT --> PRE
     SIM --> DAT
 ```
@@ -113,36 +164,69 @@ Assign slots to booking requests.
 }
 ```
 
-Response: `{ assignments: [...], summary: { total, rescheduled, rescheduleRate, avgNoShowRisk } }`.
+Response: `{ assignments: [...], method, summary: { total, rescheduled, rescheduleRate, avgNoShowRisk, optimizerCost, avgWaitMin, maxSlotLoad } }`.
+
+Optional body field `method: "greedy" | "annealed"` selects the optimizer. Optional per-request fields: `day` (0..6, default 0), `terminal` (T1|T2|T3|any). All requests in one call must share the same day.
 
 ### POST /api/simulate
 ```json
-{ "trucks": 220, "seed": 42 }
+{ "trucks": 220, "seed": 42, "days": 7, "method": "greedy" }
 ```
-Response: `{ baseline: DayMetrics, optimized: DayMetrics, params }` — queue series, gate utilization, CO₂, waits.
+`days=1` (default) returns `{ baseline: DayMetrics, optimized: DayMetrics, params }` — queue series, gate utilization, CO₂, waits. `days=2..7` returns `{ days: ScenarioResult[], horizon: HorizonSummary }` with week totals. `method` selects the optimizer for the optimized world.
 
-`GET` on either route returns usage docs.
+### POST /api/plan
+```json
+{ "trucks": 220, "seed": 42, "day": 0, "method": "greedy" }
+```
+Response: `{ day, method, requests, assignments, summary }` — the actual optimized plan for one horizon day. Powers the demo's replanning panel and CSV export.
+
+### POST /api/benchmark
+```json
+{ "trucks": 220, "seed": 42, "day": 0 }
+```
+Response: `{ day, trucks, seed, greedy: {...}, annealed: {...}, delta: {...} }` — both optimizers on identical demand, with cost, avg wait, reschedules, peak slot load, and CO₂ for each.
+
+### POST /api/replan
+```json
+{
+  "requests": [ ... ],
+  "assignments": [ ... ],
+  "disruptions": [{ "requestId": "REQ-0001", "kind": "late", "lateByMin": 60 }],
+  "nowMin": 600,
+  "method": "greedy"
+}
+```
+Response: `{ after, before, moved, removedNoShows, lateReplaced, frozen, beforeScore, afterScore }`.
+
+`GET` on any route returns usage docs.
 
 ## Screenshots
 
 Captured from the live demo at https://tas-casablanca-eliem08s-projects.vercel.app:
 
-- `docs/screenshots/landing.png` — landing page hero with the crisis stat strip
-- `docs/screenshots/demo-on.png` — dashboard with TAS ON: flattened queue curve, balanced gates, benchmark panel
-- `docs/screenshots/demo-off.png` — dashboard with TAS OFF: the status-quo congestion spike
-- `docs/screenshots/booking.png` — carrier booking form with live no-show risk meter
+- `docs/screenshots/landing.jpg` — landing page hero with the crisis stat strip
+- `docs/screenshots/demo-on.jpg` — dashboard with TAS ON: flattened queue curve, balanced gates, benchmark panel
+- `docs/screenshots/demo-off.jpg` — dashboard with TAS OFF: the status-quo congestion spike
+- `docs/screenshots/booking.jpg` — carrier booking form with live no-show risk meter
 
 ## Guided demo script (for a buyer meeting)
 
 1. Open `/` — the landing page tells the crisis story in 60 seconds.
 2. Go to `/demo` — toggle **TAS OFF**: red queue curve spikes to a midday wall; gates saturate; CO₂ climbs.
 3. Toggle **TAS ON**: the teal curve flattens, utilization balances across 3 gates, reschedule rate stays single-digit.
-4. Open `/book` — submit a booking as a trucking company; watch the optimizer place it, show no-show risk, and explain any reschedule.
-5. Close with the ROI panel: 62% / 785t / 7.8% — the ENSEM numbers this demo is calibrated to echo.
+4. Switch **Day 1 → Day 7**: the horizon totals update; each day has its own demand and plan.
+5. Toggle **Greedy → Sim. annealing**: the benchmark panel shows annealing's improvement on identical demand — never worse, usually better.
+6. **Live replanning**: set "now" to 10:00, mark a truck late +60 min, hit Re-optimize — watch the plan absorb the disruption without touching confirmed slots.
+7. **Export CSV**: download the day plan for dispatchers.
+8. Open `/book` — submit a booking as a trucking company on a chosen day/terminal; watch the optimizer place it, show no-show risk, and explain any reschedule.
+9. Close with the ROI panel: 62% / 785t / 7.8% — the ENSEM numbers this demo is calibrated to echo.
 
 ## Honest limitations
 
 - **All "live" numbers are simulated.** The dashboard runs a discrete-event simulation on synthetic demand, not on ANP or terminal operating data.
+- **Days are independent.** The horizon has no cross-day carryover — a truck that misses its day does not roll into the next day's plan. Real operations would need a carryover rule.
+- **Simulated annealing is a heuristic**, not a proof of optimality. It never loses to greedy on the shared cost function, but neither method certifies a global optimum.
+- **Replanning is a same-day heuristic.** Frozen slots are never revisited, so a replan can be locally optimal at best; a full-day re-optimization from scratch could theoretically do better (at the cost of disrupting confirmed trucks).
 - **The predictor is a heuristic**, not a trained model. Real deployment needs historical gate logs to fit no-show models (the literature uses LSTM-Transformer architectures for arrival forecasting).
 - **Single-instance in-memory demo.** No database, no auth, no real carrier integration — those are Phase-1 build items, listed in `docs/roadmap.md` (planned).
 - Crisis figures are press-reported, not audited.
@@ -151,8 +235,10 @@ Captured from the live demo at https://tas-casablanca-eliem08s-projects.vercel.a
 
 ```
 app/                # Next.js app router: / (landing), /demo, /book, /api/*
-components/         # Nav, Footer, ui primitives, charts, BookingForm
-lib/                # types, data, optimizer, predictor, simulation (pure TS)
+components/         # Nav, Footer, ui primitives, charts, BookingForm,
+                    # BenchmarkPanel, ReplanPanel, GateProfiles
+lib/                # types, data, optimizer, annealer, replan, csv,
+                    # predictor, simulation (pure TS)
 tests/              # vitest suites for lib/
 public/             # static assets
 ```
@@ -163,7 +249,7 @@ public/             # static assets
 npm test
 ```
 
-Suites cover: optimizer feasibility (every request assigned, capacity respected, determinism, optimized ≤ baseline peak load), predictor monotonicity and bounds, simulation sanity (metrics in range, TAS improves on baseline for the reference seed).
+Suites cover: optimizer feasibility (every request assigned, per-gate capacity respected, determinism, optimized ≤ baseline peak load, terminal preference, horizon day), annealing (beats-or-matches greedy on cost, determinism, capacity), replanning (confirmed slots frozen, no-show frees slot, late re-placement, no placements in the past, determinism), CSV (header, row count, quoting, slot geometry, status values), horizon (7-day coverage, per-day capacity, week aggregation, determinism), predictor monotonicity and bounds, simulation sanity (metrics in range, TAS improves on baseline for the reference seed).
 
 ## License
 
