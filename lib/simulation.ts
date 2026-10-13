@@ -8,6 +8,9 @@
  *               at the morning peak. Nobody is turned away; queues explode.
  *   optimized — TAS. Trucks arrive inside a tight window around their
  *               assigned slot; modeled no-shows (lib/predictor) never arrive.
+ *               The baseline world sees the SAME no-show set (common random
+ *               numbers), so the comparison isolates scheduling, not demand.
+ *               Only the baseline gets the unannounced walk-in surge.
  *
  * Queue model (deliberately simple, fully deterministic per seed): 5-minute
  * time steps, one FIFO queue per gate. Each gate serves trucks at its own
@@ -21,6 +24,8 @@
  */
 
 import type {
+  BookingRequest,
+  SlotAssignment,
   DayMetrics,
   ScenarioResult,
   WeekResult,
@@ -42,6 +47,9 @@ import { optimizeSlots, baselineAssign } from './optimizer';
 import { noShowProbability } from './predictor';
 
 const STEP_MIN = 5;
+
+/** Time-step size (minutes), exported for the validation module's phase correction. */
+export const SIM_STEP = STEP_MIN;
 const OPT_JITTER = 12; // optimized arrivals: ±12 min around slot
 const BASE_JITTER_EARLY = -30; // baseline arrivals: -30..
 const BASE_JITTER_LATE = 90; // ..+90 min around preferred start
@@ -52,18 +60,34 @@ const SERIES_EVERY_MIN = 30;
 const SIM_START = DAY_START_MIN - 60;
 const SIM_END = DAY_END_MIN + 120;
 
-interface Arrival {
+/** Simulation window bounds, exported for the validation module. */
+export const SIM_WINDOW = { start: SIM_START, end: SIM_END } as const;
+
+export interface Arrival {
   time: number;
   gate: number;
 }
 
-function simulateQueues(arrivals: Arrival[]): {
+export interface QueueInstrumented {
+  /** Total queue length sampled at every 5-minute step. */
+  samples: Array<{ t: number; queue: number }>;
+  /** Per-truck wait records (only trucks served before SIM_END). */
+  waits: Array<{ arrivedAt: number; servedAt: number; gate: number }>;
+  /** All arrival times (including trucks stranded at SIM_END). */
+  arrivals: number[];
+}
+
+export function simulateQueues(
+  arrivals: Arrival[],
+  opts: { instrument?: boolean } = {},
+): {
   maxQueue: number;
   avgWaitMin: number;
   served: number;
   utilization: [number, number, number];
   queueSeries: number[];
   seriesTimes: number[];
+  instrumented?: QueueInstrumented;
 } {
   const sorted = [...arrivals].sort((a, b) => a.time - b.time);
   const queues: number[][] = GATE_IDS.map(() => []); // arrival times
@@ -80,6 +104,9 @@ function simulateQueues(arrivals: Arrival[]): {
   const seriesTimes: number[] = [];
 
   let ai = 0;
+  const samples: Array<{ t: number; queue: number }> = [];
+  const waits: QueueInstrumented['waits'] = [];
+  const arrivalTimes: number[] = arrivals.map((a) => a.time);
   for (let t = SIM_START; t <= SIM_END; t += STEP_MIN) {
     totalSteps += 1;
     while (ai < sorted.length && sorted[ai].time <= t) {
@@ -95,6 +122,9 @@ function simulateQueues(arrivals: Arrival[]): {
         credit[g] -= 1;
         const arrivedAt = queues[g].shift()!;
         waitSum += Math.max(0, t - arrivedAt);
+        if (opts.instrument) {
+          waits.push({ arrivedAt, servedAt: t, gate: g });
+        }
         served += 1;
         servedThisStep = true;
       }
@@ -105,6 +135,7 @@ function simulateQueues(arrivals: Arrival[]): {
       queueSeries.push(q);
       seriesTimes.push(t);
     }
+    if (opts.instrument) samples.push({ t, queue: q });
   }
   // Trucks still queued at SIM_END never got served; charge them the
   // remaining wait estimate so avgWait reflects the meltdown honestly.
@@ -128,7 +159,78 @@ function simulateQueues(arrivals: Arrival[]): {
     ],
     queueSeries,
     seriesTimes,
+    instrumented: opts.instrument
+      ? { samples, waits, arrivals: arrivalTimes }
+      : undefined,
   };
+}
+
+/**
+ * Build the two arrival streams (TAS world + status-quo world) for a set of
+ * requests. Extracted from simulateDay so the validation module can reuse
+ * the exact same arrival process instead of re-implementing it.
+ *
+ * COMMON RANDOM NUMBERS (paired comparison): one no-show draw per truck,
+ * shared by BOTH worlds. A truck that no-shows does not arrive in either
+ * world. Previously the TAS world filtered no-shows but the baseline world
+ * did not — so the TAS-vs-baseline comparison was confounded by different
+ * realized demand (~91 arrivals vs ~246). Now both worlds see the same
+ * realized demand and the comparison isolates the SCHEDULING effect, with
+ * lower estimator variance (standard variance-reduction practice). The
+ * baseline world still gets its unannounced walk-in surge — that asymmetry
+ * is the point (TAS eliminates walk-ins).
+ */
+export function buildArrivalStreams(
+  requests: BookingRequest[],
+  optAssignments: SlotAssignment[],
+  baseAssignments: SlotAssignment[],
+  rng: () => number,
+): { optArrivals: Arrival[]; baseArrivals: Arrival[]; surge: number } {
+  const byId = new Map(requests.map((r) => [r.id, r]));
+
+  // One no-show draw per truck, shared by both worlds. p uses the
+  // PREFERRED window (the only slot information both worlds share).
+  const showsUp = new Map<string, boolean>();
+  for (const r of requests) {
+    const p = noShowProbability({
+      leadTimeHours: r.leadTimeHours,
+      driverNoShowRate: r.driverNoShowRate,
+      slotStartMin: r.preferredStart,
+      cargo: r.cargo,
+    });
+    showsUp.set(r.id, rng() >= p);
+  }
+
+  // --- Optimized arrivals: tight around the assigned slot, minus no-shows.
+  const optArrivals: Arrival[] = [];
+  for (const a of optAssignments) {
+    const req = byId.get(a.requestId);
+    if (!req) continue;
+    if (!showsUp.get(req.id)) continue; // no-show: never arrives
+    const jitter = (rng() * 2 - 1) * OPT_JITTER;
+    optArrivals.push({ time: a.slotStart + jitter, gate: a.gate });
+  }
+
+  // --- Baseline arrivals: preferred time ± wide jitter + walk-in surge.
+  // Same no-show set as the TAS world (paired comparison).
+  const baseArrivals: Arrival[] = [];
+  for (const a of baseAssignments) {
+    const req = byId.get(a.requestId);
+    if (!req) continue;
+    if (!showsUp.get(req.id)) continue; // no-show: never arrives
+    const jitter =
+      BASE_JITTER_EARLY + rng() * (BASE_JITTER_LATE - BASE_JITTER_EARLY);
+    baseArrivals.push({ time: req.preferredStart + jitter, gate: a.gate });
+  }
+  const surge = Math.round(requests.length * BASELINE_SURGE_RATE);
+  for (let i = 0; i < surge; i++) {
+    baseArrivals.push({
+      time: DAY_START_MIN + rng() * PEAK_WINDOW_MIN,
+      gate: GATE_IDS[Math.floor(rng() * GATE_IDS.length)],
+    });
+  }
+
+  return { optArrivals, baseArrivals, surge };
 }
 
 /**
@@ -149,40 +251,12 @@ export function simulateDay(
     method: opts.method ?? 'greedy',
   });
   const baseAssignments = baselineAssign(requests);
-  const byId = new Map(requests.map((r) => [r.id, r]));
-
-  // --- Optimized arrivals: tight around the assigned slot, minus no-shows.
-  const optArrivals: Arrival[] = [];
-  for (const a of optAssignments) {
-    const req = byId.get(a.requestId);
-    if (!req) continue;
-    const p = noShowProbability({
-      leadTimeHours: req.leadTimeHours,
-      driverNoShowRate: req.driverNoShowRate,
-      slotStartMin: a.slotStart,
-      cargo: req.cargo,
-    });
-    if (rng() < p) continue; // no-show: never arrives
-    const jitter = (rng() * 2 - 1) * OPT_JITTER;
-    optArrivals.push({ time: a.slotStart + jitter, gate: a.gate });
-  }
-
-  // --- Baseline arrivals: preferred time ± wide jitter + walk-in surge.
-  const baseArrivals: Arrival[] = [];
-  for (const a of baseAssignments) {
-    const req = byId.get(a.requestId);
-    if (!req) continue;
-    const jitter =
-      BASE_JITTER_EARLY + rng() * (BASE_JITTER_LATE - BASE_JITTER_EARLY);
-    baseArrivals.push({ time: req.preferredStart + jitter, gate: a.gate });
-  }
-  const surge = Math.round(nTrucks * BASELINE_SURGE_RATE);
-  for (let i = 0; i < surge; i++) {
-    baseArrivals.push({
-      time: DAY_START_MIN + rng() * PEAK_WINDOW_MIN,
-      gate: GATE_IDS[Math.floor(rng() * GATE_IDS.length)],
-    });
-  }
+  const { optArrivals, baseArrivals, surge } = buildArrivalStreams(
+    requests,
+    optAssignments,
+    baseAssignments,
+    rng,
+  );
 
   const opt = simulateQueues(optArrivals);
   const base = simulateQueues(baseArrivals);

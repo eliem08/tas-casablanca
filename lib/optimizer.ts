@@ -64,6 +64,30 @@ const LOCAL_SEARCH_ITERATIONS = 250;
 /** Annealing moves (kept small so the demo stays interactive). */
 const ANNEAL_ITERATIONS = 2500;
 
+/** Objective weights for the shared cost function. Pareto sweeps override them. */
+export interface CostWeights {
+  /** Weight on peak slot load (max over all gate/slots). */
+  peak: number;
+  /** Weight per rescheduled truck (assigned outside its preferred window). */
+  reschedule: number;
+  /** Weight per terminal mismatch (truck placed at another terminal's gate). */
+  terminal: number;
+  /** Weight per minute of modelled wait. */
+  wait: number;
+}
+
+/** Default weights: the cost function documented in the README. */
+export const DEFAULT_COST_WEIGHTS: CostWeights = {
+  peak: 10,
+  reschedule: 3,
+  terminal: 2,
+  wait: 0.5,
+};
+
+function resolveWeights(w?: Partial<CostWeights>): CostWeights {
+  return { ...DEFAULT_COST_WEIGHTS, ...(w ?? {}) };
+}
+
 export interface OptimizeOptions {
   seed?: number;
   /** Inflate per-slot capacity using the no-show-aware overbooking limit. */
@@ -81,6 +105,11 @@ export interface OptimizeOptions {
    * Replanning sets this to "now" so no truck is placed in the past.
    */
   earliestSlotStart?: number;
+  /**
+   * Objective weights (Pareto sweeps override them). Defaults reproduce the
+   * documented cost function: 10·peak + 3·rescheduled + 2·mismatch + 0.5·wait.
+   */
+  weights?: Partial<CostWeights>;
 }
 
 /** Default gate per cargo family (matches TERMINAL_BY_GATE in data.ts). */
@@ -153,8 +182,9 @@ function assignmentOf(p: Placed, loads: number[][]): SlotAssignment {
  * Shared cost function: peak slot load dominates, then reschedules, then
  * waiting time, then terminal mismatches. Greedy local search, annealing,
  * and scorePlan all use this — so comparisons between methods are fair.
+ * Weights default to the documented cost function; Pareto sweeps override.
  */
-function totalCost(placed: Placed[], loads: number[][]): number {
+function totalCost(placed: Placed[], loads: number[][], w: CostWeights): number {
   let maxLoad = 0;
   let rescheduled = 0;
   let terminalMismatch = 0;
@@ -169,7 +199,12 @@ function totalCost(placed: Placed[], loads: number[][]): number {
       if (gateForTerminal(p.req.terminal) !== p.gate) terminalMismatch += 1;
     }
   }
-  return maxLoad * 10 + rescheduled * 3 + terminalMismatch * 2 + wait * 0.5;
+  return (
+    maxLoad * w.peak +
+    rescheduled * w.reschedule +
+    terminalMismatch * w.terminal +
+    wait * w.wait
+  );
 }
 
 function rebuildLoads(placed: Placed[], base?: number[][]): number[][] {
@@ -288,10 +323,11 @@ export function optimizeSlots(
   }
 
   // Local search: random reassignments accepted only on strict improvement.
+  const weights = resolveWeights(opts.weights);
   for (let it = 0; it < LOCAL_SEARCH_ITERATIONS; it++) {
     const i = Math.floor(rng() * placed.length);
     const p = placed[i];
-    const before = totalCost(placed, loads);
+    const before = totalCost(placed, loads, weights);
 
     const oldG = p.gate;
     const oldS = p.slot;
@@ -304,7 +340,7 @@ export function optimizeSlots(
     loads[newG][newS] += 1;
 
     const cap = capacityFor(newG, overbookFactor);
-    const after = totalCost(placed, loads);
+    const after = totalCost(placed, loads, weights);
     if (!(after < before - 1e-9) || loads[newG][newS] > cap) {
       // revert: no improvement, or the move broke slot capacity
       loads[newG][newS] -= 1;
@@ -330,7 +366,7 @@ export function optimizeSlots(
           if (l[g][s] > capOf(g)) violation += l[g][s] - capOf(g);
         }
       }
-      return totalCost(st, l) + violation * 1000;
+      return totalCost(st, l, weights) + violation * 1000;
     };
     const { best } = simulatedAnneal({
       initial: state,
@@ -372,12 +408,15 @@ export function optimizeSlots(
 
 /**
  * Score a finished plan on the shared cost function. Used by the benchmark
- * panel to compare methods on identical demand.
+ * panel to compare methods on identical demand. Weights default to the
+ * documented cost function; pass Pareto weights to score under them.
  */
 export function scorePlan(
   assignments: SlotAssignment[],
   requests: BookingRequest[],
+  weights?: Partial<CostWeights>,
 ): { cost: number; maxLoad: number; rescheduled: number; totalWait: number; avgWait: number } {
+  const w = resolveWeights(weights);
   const byId = new Map(requests.map((r) => [r.id, r]));
   const loads = emptyLoads();
   for (const a of assignments) {
@@ -397,7 +436,11 @@ export function scorePlan(
     const l = loads[a.gate][startToSlotIndex(a.slotStart)];
     if (l > maxLoad) maxLoad = l;
   }
-  const cost = maxLoad * 10 + rescheduled * 3 + terminalMismatch * 2 + wait * 0.5;
+  const cost =
+    maxLoad * w.peak +
+    rescheduled * w.reschedule +
+    terminalMismatch * w.terminal +
+    wait * w.wait;
   return {
     cost,
     maxLoad,

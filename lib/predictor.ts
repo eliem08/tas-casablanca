@@ -51,12 +51,27 @@ function clamp(value: number, min: number, max: number): number {
 /**
  * Logistic-style no-show score.
  *
- *   z = -2.2 + 0.045 * min(leadTimeHours, 72) + 4.0 * driverNoShowRate
+ *   z = -3.2 + 0.012 * min(leadTimeHours, 72) + 4.0 * driverNoShowRate
  *         + nightPenalty + cargoAdj
  *   p = 1 / (1 + e^-z), clamped to [0.02, 0.85]
  *
- * The intercept (-2.2) encodes the base rate of a well-behaved carrier booking
- * a daytime general-freight slot well in advance: roughly 10% no-show.
+ * DIRECTION OF THE LEAD-TIME EFFECT (read carefully): the lead-time
+ * coefficient is POSITIVE — bookings made further in advance score HIGHER
+ * no-show risk (plans made far ahead are more likely to change). This is
+ * the behaviour pinned by tests/predictor.test.ts.
+ *
+ * RECALIBRATION (2026-10-13, professor-level review): the previous
+ * coefficients (−2.2 intercept, +0.045 lead) implied a 40–60% no-show
+ * rate for typical bookings — contradicting this file's own documented
+ * ~10% base rate, real TAS experience (5–15%), and the simulation's
+ * premise. With the demo's lead-time distribution (2–72h, mean ~37h),
+ * the old coefficients made only ~40% of booked trucks arrive, so the
+ * simulated port sat far below capacity and the TAS-vs-baseline gap was
+ * mostly a demand artifact, not a scheduling effect. The new coefficients
+ * imply a typical p ≈ 0.08–0.16 (short lead ≈ 0.08, long lead ≈ 0.16,
+ * night/grain/driver-history adjustments on top), consistent with the
+ * documented base rate and with reality. This is still a prior to be
+ * refitted from real booking history — not a measurement.
  */
 export function noShowProbability(f: NoShowFeatures): number {
   const leadTimeHours = clamp(f.leadTimeHours, 0, LEAD_TIME_CAP_HOURS);
@@ -84,7 +99,7 @@ export function noShowProbability(f: NoShowFeatures): number {
       break;
   }
 
-  const z = -2.2 + 0.045 * leadTimeHours + 4.0 * driverNoShowRate + nightPenalty + cargoAdj;
+  const z = -3.2 + 0.012 * leadTimeHours + 4.0 * driverNoShowRate + nightPenalty + cargoAdj;
   const p = 1 / (1 + Math.exp(-z));
 
   return clamp(p, P_MIN, P_MAX);
@@ -119,9 +134,9 @@ export function explainProbability(f: NoShowFeatures): string[] {
 
   const lead = clamp(f.leadTimeHours, 0, LEAD_TIME_CAP_HOURS);
   if (lead <= 6) {
-    reasons.push(`Booked only ${Math.max(1, Math.round(lead))}h ahead (+risk)`);
+    reasons.push(`Booked only ${Math.max(1, Math.round(lead))}h ahead — last-minute, plans firm (-risk)`);
   } else if (lead >= 48) {
-    reasons.push(`Booked ${Math.round(lead)}h ahead (-risk)`);
+    reasons.push(`Booked ${Math.round(lead)}h ahead — long horizon, plans may change (+risk)`);
   }
 
   const rate = clamp(f.driverNoShowRate, 0, 1);
