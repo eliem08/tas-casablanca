@@ -10,20 +10,32 @@
  *               assigned slot; modeled no-shows (lib/predictor) never arrive.
  *
  * Queue model (deliberately simple, fully deterministic per seed): 5-minute
- * time steps, one FIFO queue per gate, one truck served per gate per step
- * (SERVICE_MIN_PER_TRUCK = 5). Enough to reproduce the congestion curve
- * without pretending to be a traffic microsimulator.
+ * time steps, one FIFO queue per gate. Each gate serves trucks at its own
+ * rate (express 4 min, standard 5 min, inspection 8 min) via a service-
+ * credit accumulator: a gate serves a truck once it has banked a full
+ * service interval. Enough to reproduce the congestion curve without
+ * pretending to be a traffic microsimulator.
+ *
+ * simulateWeek runs one day per horizon day (each day seeded
+ * seed + day * 101) and aggregates the totals.
  */
 
-import type { DayMetrics, ScenarioResult } from './types';
+import type {
+  DayMetrics,
+  ScenarioResult,
+  WeekResult,
+  HorizonSummary,
+  OptimizerMethod,
+} from './types';
 import {
   GATE_IDS,
   DAY_START_MIN,
   DAY_END_MIN,
-  SERVICE_MIN_PER_TRUCK,
   IDLE_FUEL_L_PER_H,
   CO2_KG_PER_L,
   minutesToHHMM,
+  serviceMinForGate,
+  HORIZON_DAYS,
 } from './types';
 import { makeRng, generateDayRequests } from './data';
 import { optimizeSlots, baselineAssign } from './optimizer';
@@ -55,6 +67,10 @@ function simulateQueues(arrivals: Arrival[]): {
 } {
   const sorted = [...arrivals].sort((a, b) => a.time - b.time);
   const queues: number[][] = GATE_IDS.map(() => []); // arrival times
+  // Service credit per gate: a gate serves a truck once credit >= 1.
+  // Credit grows by STEP_MIN / serviceMin per step, so faster gates serve
+  // more trucks per step on average.
+  const credit = GATE_IDS.map((g) => 0);
   const busySteps = [0, 0, 0];
   let totalSteps = 0;
   let maxQueue = 0;
@@ -73,12 +89,16 @@ function simulateQueues(arrivals: Arrival[]): {
     let q = 0;
     for (const g of GATE_IDS) {
       q += queues[g].length;
-      if (queues[g].length > 0) {
-        busySteps[g] += 1;
+      credit[g] += STEP_MIN / serviceMinForGate(g);
+      let servedThisStep = false;
+      while (credit[g] >= 1 && queues[g].length > 0) {
+        credit[g] -= 1;
         const arrivedAt = queues[g].shift()!;
         waitSum += Math.max(0, t - arrivedAt);
         served += 1;
+        servedThisStep = true;
       }
+      if (servedThisStep) busySteps[g] += 1;
     }
     if (q > maxQueue) maxQueue = q;
     if ((t - SIM_START) % SERIES_EVERY_MIN === 0) {
@@ -113,13 +133,21 @@ function simulateQueues(arrivals: Arrival[]): {
 
 /**
  * Simulate one operating day with `nTrucks` of demand.
- * Deterministic for a given seed.
+ * Deterministic for a given (seed, method) pair.
  */
-export function simulateDay(nTrucks = 220, seed = 42): ScenarioResult {
+export function simulateDay(
+  nTrucks = 220,
+  seed = 42,
+  opts: { method?: OptimizerMethod; day?: number } = {},
+): ScenarioResult {
   const rng = makeRng(seed);
   const requests = generateDayRequests(nTrucks, seed);
 
-  const optAssignments = optimizeSlots(requests, { seed, overbook: true });
+  const optAssignments = optimizeSlots(requests, {
+    seed,
+    overbook: true,
+    method: opts.method ?? 'greedy',
+  });
   const baseAssignments = baselineAssign(requests);
   const byId = new Map(requests.map((r) => [r.id, r]));
 
@@ -186,6 +214,8 @@ export function simulateDay(nTrucks = 220, seed = 42): ScenarioResult {
       baseline: 0, // filled by caller
       optimized: 0,
     })),
+    day: opts.day ?? 0,
+    method: opts.method ?? 'greedy',
   });
 
   const bMetrics = toMetrics(base, nTrucks + surge, 0);
@@ -210,4 +240,53 @@ export function simulateDay(nTrucks = 220, seed = 42): ScenarioResult {
     optimized: oMetrics,
     params: { trucks: nTrucks, seed },
   };
+}
+
+/**
+ * Simulate a whole rolling horizon: one day per horizon day, each seeded
+ * seed + day * 101 (same offset scheme as generateWeekRequests), then
+ * aggregate the totals. Deterministic for a given (trucks, seed, method).
+ */
+export function simulateWeek(
+  nTrucksPerDay = 220,
+  seed = 42,
+  days: number = HORIZON_DAYS,
+  method: OptimizerMethod = 'greedy',
+): WeekResult {
+  const dayResults: ScenarioResult[] = [];
+  for (let day = 0; day < days; day += 1) {
+    dayResults.push(
+      simulateDay(nTrucksPerDay, seed + day * 101, { method, day }),
+    );
+  }
+
+  const totalTrucks = dayResults.reduce((s, r) => s + r.optimized.totalTrucks, 0);
+  const totalCo2Baseline = dayResults.reduce((s, r) => s + r.baseline.co2Tonnes, 0);
+  const totalCo2Optimized = dayResults.reduce((s, r) => s + r.optimized.co2Tonnes, 0);
+  const waitBaseline =
+    dayResults.reduce((s, r) => s + r.baseline.avgWaitMin * r.baseline.totalTrucks, 0) /
+    Math.max(1, dayResults.reduce((s, r) => s + r.baseline.totalTrucks, 0));
+  const waitOptimized =
+    dayResults.reduce((s, r) => s + r.optimized.avgWaitMin * r.optimized.totalTrucks, 0) /
+    Math.max(1, totalTrucks);
+  const rescheduled = dayResults.reduce(
+    (s, r) => s + r.optimized.rescheduleRate * r.optimized.totalTrucks,
+    0,
+  );
+
+  const horizon: HorizonSummary = {
+    days,
+    totalTrucks,
+    totalCo2Baseline: Math.round(totalCo2Baseline * 1000) / 1000,
+    totalCo2Optimized: Math.round(totalCo2Optimized * 1000) / 1000,
+    co2SavedTonnes:
+      Math.round((totalCo2Baseline - totalCo2Optimized) * 1000) / 1000,
+    avgWaitBaseline: Math.round(waitBaseline * 10) / 10,
+    avgWaitOptimized: Math.round(waitOptimized * 10) / 10,
+    maxQueueBaseline: Math.max(...dayResults.map((r) => r.baseline.maxQueueLength)),
+    maxQueueOptimized: Math.max(...dayResults.map((r) => r.optimized.maxQueueLength)),
+    rescheduleRate: Math.round((rescheduled / Math.max(1, totalTrucks)) * 1000) / 1000,
+  };
+
+  return { days: dayResults, horizon };
 }

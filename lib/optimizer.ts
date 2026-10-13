@@ -3,18 +3,35 @@
  *
  * Slot-allocation optimizer for the truck appointment system.
  *
- * Two strategies:
- *   - optimizeSlots: greedy assignment (preferred window first, least-loaded
- *     gate/slot) followed by a short local-search improvement phase that
- *     minimizes peak slot load, reschedules, and waiting time.
+ * Three strategies, all deterministic given a seed:
+ *   - optimizeSlots (method 'greedy'): greedy assignment (preferred window
+ *     first, least-loaded gate/slot) followed by a short local-search
+ *     improvement phase that minimizes peak slot load, reschedules, and
+ *     waiting time.
+ *   - optimizeSlots (method 'annealed'): greedy + local search, then
+ *     simulated annealing (lib/annealer.ts) over single-truck reassignments.
+ *     The best-seen solution is kept, so annealing can never do worse than
+ *     greedy on the shared cost function.
  *   - baselineAssign: first-come-first-served — each truck takes the earliest
  *     feasible slot at its cargo's default gate, ignoring load balancing.
  *     This reproduces the "status quo" congestion for comparison.
  *
- * Deterministic given a seed. Pure functions — no I/O, no framework.
+ * Per-gate service model: gates have different service times and therefore
+ * different per-slot capacities (express 7, standard 6, inspection 3).
+ * Terminal preference: a booking naming a terminal pays a penalty when placed
+ * at another terminal's gate.
+ *
+ * Pure functions — no I/O, no framework.
  */
 
-import type { BookingRequest, SlotAssignment, GateId } from './types';
+import type {
+  BookingRequest,
+  SlotAssignment,
+  GateId,
+  HorizonPlan,
+  OptimizerMethod,
+  TerminalId,
+} from './types';
 import {
   GATES,
   GATE_IDS,
@@ -22,25 +39,48 @@ import {
   DAY_START_MIN,
   DAY_END_MIN,
   SLOTS_PER_GATE,
+  HORIZON_DAYS,
   slotIndexToStart,
   startToSlotIndex,
+  slotIndexAtOrAfter,
+  capacityForGate,
+  serviceMinForGate,
+  terminalForGate,
+  gateForTerminal,
 } from './types';
 import { makeRng } from './data';
 import { noShowProbability, overbookLimit } from './predictor';
-
-/** Trucks served per gate per 30-minute slot (5-minute service time). */
-export const SLOT_CAPACITY = 4;
+import { simulatedAnneal } from './annealer';
 
 /** Penalty added when a candidate slot falls outside the preferred window. */
 const RESCHEDULE_PENALTY = 6;
 
+/** Penalty added when a candidate gate is not the booking's terminal gate. */
+const TERMINAL_MISMATCH_PENALTY = 4;
+
 /** Local-search iterations. */
 const LOCAL_SEARCH_ITERATIONS = 250;
+
+/** Annealing moves (kept small so the demo stays interactive). */
+const ANNEAL_ITERATIONS = 2500;
 
 export interface OptimizeOptions {
   seed?: number;
   /** Inflate per-slot capacity using the no-show-aware overbooking limit. */
   overbook?: boolean;
+  /** Optimization strategy: greedy+local-search (default) or + annealing. */
+  method?: OptimizerMethod;
+  /**
+   * Pre-occupied slots (frozen assignments from replanning). Each entry
+   * counts toward that gate/slot's load and capacity; the optimizer never
+   * moves them and never double-books past capacity because of them.
+   */
+  blocked?: Array<{ gate: GateId; slotStart: number }>;
+  /**
+   * Earliest slot start (minutes since midnight) the optimizer may use.
+   * Replanning sets this to "now" so no truck is placed in the past.
+   */
+  earliestSlotStart?: number;
 }
 
 /** Default gate per cargo family (matches TERMINAL_BY_GATE in data.ts). */
@@ -86,6 +126,10 @@ interface Placed {
   slot: number; // slot index
 }
 
+function emptyLoads(): number[][] {
+  return GATE_IDS.map(() => new Array<number>(SLOTS_PER_GATE).fill(0));
+}
+
 function assignmentOf(p: Placed, loads: number[][]): SlotAssignment {
   const slotStart = slotIndexToStart(p.slot);
   const inWindow =
@@ -98,14 +142,22 @@ function assignmentOf(p: Placed, loads: number[][]): SlotAssignment {
     slotStart,
     rescheduled: !inWindow,
     noShowProbability: noShowProbability(featuresFor(p.req, slotStart)),
-    // Expected queue wait: half the trucks ahead of you × service time.
-    waitEstimateMin: Math.max(0, ((load - 1) * 5) / 2),
+    // Expected queue wait: half the trucks ahead of you × this gate's service time.
+    waitEstimateMin: Math.max(0, ((load - 1) * serviceMinForGate(p.gate)) / 2),
+    day: p.req.day ?? 0,
+    terminal: terminalForGate(p.gate),
   };
 }
 
+/**
+ * Shared cost function: peak slot load dominates, then reschedules, then
+ * waiting time, then terminal mismatches. Greedy local search, annealing,
+ * and scorePlan all use this — so comparisons between methods are fair.
+ */
 function totalCost(placed: Placed[], loads: number[][]): number {
   let maxLoad = 0;
   let rescheduled = 0;
+  let terminalMismatch = 0;
   let wait = 0;
   for (const p of placed) {
     const a = assignmentOf(p, loads);
@@ -113,20 +165,30 @@ function totalCost(placed: Placed[], loads: number[][]): number {
     wait += a.waitEstimateMin;
     const l = loads[p.gate][p.slot];
     if (l > maxLoad) maxLoad = l;
+    if (p.req.terminal && p.req.terminal !== 'any') {
+      if (gateForTerminal(p.req.terminal) !== p.gate) terminalMismatch += 1;
+    }
   }
-  return maxLoad * 10 + rescheduled * 3 + wait * 0.5;
+  return maxLoad * 10 + rescheduled * 3 + terminalMismatch * 2 + wait * 0.5;
 }
 
-function rebuildLoads(placed: Placed[]): number[][] {
-  const loads: number[][] = GATE_IDS.map(() =>
-    new Array<number>(SLOTS_PER_GATE).fill(0),
-  );
+function rebuildLoads(placed: Placed[], base?: number[][]): number[][] {
+  const loads = base ? base.map((row) => [...row]) : emptyLoads();
   for (const p of placed) loads[p.gate][p.slot] += 1;
   return loads;
 }
 
+/** Capacity for a gate/slot, optionally inflated by overbooking. */
+function capacityFor(gate: GateId, overbookFactor: number): number {
+  const base = capacityForGate(gate);
+  if (overbookFactor <= 1) return base;
+  return Math.min(Math.ceil(base * overbookFactor), base * 2);
+}
+
 /**
- * Greedy + local-search slot assignment.
+ * Greedy + local-search (+ optional annealing) slot assignment for ONE day.
+ * Requests carrying a `day` field keep it on their assignments; the caller
+ * is responsible for grouping multi-day demand (see optimizeHorizon).
  */
 export function optimizeSlots(
   requests: BookingRequest[],
@@ -135,8 +197,8 @@ export function optimizeSlots(
   if (!requests || requests.length === 0) return [];
   const rng = makeRng(opts.seed ?? 7);
 
-  // Capacity, optionally inflated by expected no-shows.
-  let capacity = SLOT_CAPACITY;
+  // Overbooking factor from expected no-shows (same for every gate).
+  let overbookFactor = 1;
   if (opts.overbook) {
     const avg =
       requests.reduce(
@@ -150,30 +212,51 @@ export function optimizeSlots(
           }),
         0,
       ) / requests.length;
-    capacity = overbookLimit(SLOT_CAPACITY, avg);
+    overbookFactor = overbookLimit(1, avg); // 1 -> inflated unit factor
+    // overbookLimit(1, avg) returns ceil(1 / showUpRate) capped at 2.
   }
+
+  // Frozen (blocked) loads count toward capacity from the start.
+  const blockedLoads = emptyLoads();
+  for (const b of opts.blocked ?? []) {
+    const s = startToSlotIndex(b.slotStart);
+    blockedLoads[b.gate][s] += 1;
+  }
+
+  // No placement before this slot (replanning: never schedule in the past).
+  const minSlot =
+    opts.earliestSlotStart !== undefined
+      ? slotIndexAtOrAfter(opts.earliestSlotStart)
+      : 0;
 
   // Greedy order: earliest preferred start first (stable by id).
   const order = [...requests].sort(
     (a, b) => a.preferredStart - b.preferredStart || (a.id < b.id ? -1 : 1),
   );
 
-  const loads: number[][] = GATE_IDS.map(() =>
-    new Array<number>(SLOTS_PER_GATE).fill(0),
-  );
+  const loads: number[][] = blockedLoads.map((row) => [...row]);
   const placed: Placed[] = [];
 
   for (const req of order) {
     const ws = startToSlotIndex(req.preferredStart);
     const we = Math.max(ws, startToSlotIndex(req.preferredEnd));
+    const terminalGate =
+      req.terminal && req.terminal !== 'any'
+        ? gateForTerminal(req.terminal as TerminalId)
+        : null;
     let best: { g: GateId; s: number; cost: number } | null = null;
 
-    for (let s = 0; s < SLOTS_PER_GATE; s++) {
+    for (let s = minSlot; s < SLOTS_PER_GATE; s++) {
       const inWindow = s >= ws && s <= we;
       const penalty = inWindow ? 0 : RESCHEDULE_PENALTY;
       for (const g of GATE_IDS) {
-        if (loads[g][s] >= capacity) continue;
-        const cost = loads[g][s] + penalty;
+        const cap = capacityFor(g, overbookFactor);
+        if (loads[g][s] >= cap) continue;
+        const termPenalty =
+          terminalGate !== null && terminalGate !== g
+            ? TERMINAL_MISMATCH_PENALTY
+            : 0;
+        const cost = loads[g][s] + penalty + termPenalty;
         if (
           best === null ||
           cost < best.cost - 1e-9 ||
@@ -186,10 +269,10 @@ export function optimizeSlots(
     }
 
     // Fallback: if every slot is at capacity (extreme overload), allow overflow
-    // on the least-loaded slot inside the window.
+    // on the least-loaded slot inside the window (never before minSlot).
     if (!best) {
       let minLoad = Infinity;
-      for (let s = ws; s <= we; s++) {
+      for (let s = Math.max(ws, minSlot); s <= we; s++) {
         for (const g of GATE_IDS) {
           if (loads[g][s] < minLoad) {
             minLoad = loads[g][s];
@@ -198,8 +281,8 @@ export function optimizeSlots(
         }
       }
     }
-    // Absolute fallback (should be unreachable): first slot, gate 0.
-    const pick = best ?? { g: 0 as GateId, s: ws, cost: 0 };
+    // Absolute fallback (should be unreachable): earliest usable slot, gate 0.
+    const pick = best ?? { g: 0 as GateId, s: Math.max(ws, minSlot), cost: 0 };
     loads[pick.g][pick.s] += 1;
     placed.push({ req, gate: pick.g, slot: pick.s });
   }
@@ -215,13 +298,14 @@ export function optimizeSlots(
     loads[oldG][oldS] -= 1;
 
     const newG = GATE_IDS[Math.floor(rng() * GATE_IDS.length)];
-    const newS = Math.floor(rng() * SLOTS_PER_GATE);
+    const newS = minSlot + Math.floor(rng() * (SLOTS_PER_GATE - minSlot));
     p.gate = newG;
     p.slot = newS;
     loads[newG][newS] += 1;
 
+    const cap = capacityFor(newG, overbookFactor);
     const after = totalCost(placed, loads);
-    if (!(after < before - 1e-9) || loads[newG][newS] > capacity) {
+    if (!(after < before - 1e-9) || loads[newG][newS] > cap) {
       // revert: no improvement, or the move broke slot capacity
       loads[newG][newS] -= 1;
       p.gate = oldG;
@@ -230,8 +314,136 @@ export function optimizeSlots(
     }
   }
 
-  const finalLoads = rebuildLoads(placed);
+  // Simulated annealing: random single-truck moves, uphill moves accepted
+  // with probability exp(-Δ/T) under geometric cooling. Best-seen wins.
+  if (opts.method === 'annealed' && placed.length > 0) {
+    const capOf = (g: GateId) => capacityFor(g, overbookFactor);
+    const state = placed.map((p) => ({ ...p }));
+    // Capacity violations get a steep penalty inside the SA cost so the
+    // search steers away from infeasible states instead of discovering them
+    // only at the final feasibility check.
+    const costOf = (st: Placed[]) => {
+      const l = rebuildLoads(st, blockedLoads);
+      let violation = 0;
+      for (const g of GATE_IDS) {
+        for (let s = 0; s < SLOTS_PER_GATE; s++) {
+          if (l[g][s] > capOf(g)) violation += l[g][s] - capOf(g);
+        }
+      }
+      return totalCost(st, l) + violation * 1000;
+    };
+    const { best } = simulatedAnneal({
+      initial: state,
+      clone: (s) => s.map((p) => ({ ...p })),
+      cost: costOf,
+      neighbor: (st, nrng) => {
+        const i = Math.floor(nrng() * st.length);
+        st[i].gate = GATE_IDS[Math.floor(nrng() * GATE_IDS.length)];
+        st[i].slot = minSlot + Math.floor(nrng() * (SLOTS_PER_GATE - minSlot));
+      },
+      options: {
+        iterations: ANNEAL_ITERATIONS,
+        startTemp: 6,
+        endTemp: 0.02,
+        rng,
+      },
+    });
+    // Accept the annealed placement only if it respects capacity everywhere;
+    // the best-seen guarantee means it is never worse than greedy on cost.
+    const annealedLoads = rebuildLoads(best, blockedLoads);
+    let feasible = true;
+    for (const g of GATE_IDS) {
+      for (let s = 0; s < SLOTS_PER_GATE; s++) {
+        if (annealedLoads[g][s] > capOf(g) + 1e-9) {
+          feasible = false;
+          break;
+        }
+      }
+      if (!feasible) break;
+    }
+    if (feasible) {
+      placed.splice(0, placed.length, ...best);
+    }
+  }
+
+  const finalLoads = rebuildLoads(placed, blockedLoads);
   return placed.map((p) => assignmentOf(p, finalLoads));
+}
+
+/**
+ * Score a finished plan on the shared cost function. Used by the benchmark
+ * panel to compare methods on identical demand.
+ */
+export function scorePlan(
+  assignments: SlotAssignment[],
+  requests: BookingRequest[],
+): { cost: number; maxLoad: number; rescheduled: number; totalWait: number; avgWait: number } {
+  const byId = new Map(requests.map((r) => [r.id, r]));
+  const loads = emptyLoads();
+  for (const a of assignments) {
+    loads[a.gate][startToSlotIndex(a.slotStart)] += 1;
+  }
+  let maxLoad = 0;
+  let rescheduled = 0;
+  let terminalMismatch = 0;
+  let wait = 0;
+  for (const a of assignments) {
+    const req = byId.get(a.requestId);
+    if (req?.terminal && req.terminal !== 'any') {
+      if (gateForTerminal(req.terminal) !== a.gate) terminalMismatch += 1;
+    }
+    if (a.rescheduled) rescheduled += 1;
+    wait += a.waitEstimateMin;
+    const l = loads[a.gate][startToSlotIndex(a.slotStart)];
+    if (l > maxLoad) maxLoad = l;
+  }
+  const cost = maxLoad * 10 + rescheduled * 3 + terminalMismatch * 2 + wait * 0.5;
+  return {
+    cost,
+    maxLoad,
+    rescheduled,
+    totalWait: wait,
+    avgWait: assignments.length > 0 ? wait / assignments.length : 0,
+  };
+}
+
+/**
+ * Optimize a whole rolling horizon: group requests by day, optimize each
+ * day independently (days share no capacity — each day has its own slots),
+ * and return one plan per day.
+ */
+export function optimizeHorizon(
+  requests: BookingRequest[],
+  opts: OptimizeOptions = {},
+): HorizonPlan {
+  const byDay = new Map<number, BookingRequest[]>();
+  for (const r of requests) {
+    const d = r.day ?? 0;
+    const list = byDay.get(d) ?? [];
+    list.push(r);
+    byDay.set(d, list);
+  }
+  const days: HorizonPlan['days'] = [];
+  const dayKeys = [...byDay.keys()].sort((a, b) => a - b);
+  for (const d of dayKeys) {
+    days.push({
+      day: d,
+      requests: byDay.get(d) ?? [],
+      assignments: optimizeSlots(byDay.get(d) ?? [], {
+        ...opts,
+        seed: (opts.seed ?? 7) + d * 101,
+      }),
+    });
+  }
+  // Include empty days up to the horizon length so the UI can render them.
+  const maxDay = Math.max(HORIZON_DAYS - 1, ...dayKeys);
+  for (let d = 0; d <= maxDay; d += 1) {
+    if (!byDay.has(d)) {
+      days.push({ day: d, requests: [], assignments: [] });
+    }
+  }
+  days.sort((a, b) => a.day - b.day);
+  return { days, method: opts.method ?? 'greedy' };
 }
 
 /**
@@ -249,10 +461,11 @@ export function baselineAssign(requests: BookingRequest[]): SlotAssignment[] {
   for (const req of order) {
     const gate = DEFAULT_GATE[req.cargo] ?? 0;
     const ws = startToSlotIndex(req.preferredStart);
+    const cap = capacityForGate(gate);
     // Earliest slot at this gate with spare capacity; else the emptiest slot.
     let slot = -1;
     for (let s = ws; s < SLOTS_PER_GATE; s++) {
-      if (loads[gate][s] < SLOT_CAPACITY) {
+      if (loads[gate][s] < cap) {
         slot = s;
         break;
       }
@@ -274,7 +487,12 @@ export function baselineAssign(requests: BookingRequest[]): SlotAssignment[] {
       slotStart,
       rescheduled: false, // baseline never "reschedules" — it just queues
       noShowProbability: 0, // unknown without a TAS
-      waitEstimateMin: Math.max(0, ((loads[gate][slot] - 1) * 5) / 2),
+      waitEstimateMin: Math.max(
+        0,
+        ((loads[gate][slot] - 1) * serviceMinForGate(gate)) / 2,
+      ),
+      day: req.day ?? 0,
+      terminal: terminalForGate(gate),
     });
   }
   return out;

@@ -170,7 +170,23 @@ function pickPreferredWindow(rng: () => number): { start: number; end: number } 
 }
 
 /** Base epoch for the simulated operating day: 2026-10-12, 00:00 UTC. */
-const SIM_DAY_EPOCH_MS = Date.UTC(2026, 9, 12, 0, 0, 0, 0);
+export const SIM_DAY_EPOCH_MS = Date.UTC(2026, 9, 12, 0, 0, 0, 0);
+
+/**
+ * Human label for a horizon day, e.g. "Mon 12 Oct".
+ * Deterministic (UTC-based) so server and client agree.
+ */
+export function horizonDayLabel(day: number): string {
+  const d = new Date(SIM_DAY_EPOCH_MS + day * 86_400_000);
+  const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+}
+
+/** ISO date (YYYY-MM-DD) for a horizon day — used by CSV export. */
+export function horizonDayISO(day: number): string {
+  return new Date(SIM_DAY_EPOCH_MS + day * 86_400_000).toISOString().slice(0, 10);
+}
 
 /**
  * Generates `n` realistic booking requests for one operating day.
@@ -214,4 +230,29 @@ export function generateDayRequests(n: number, seed: number): BookingRequest[] {
   }
 
   return requests;
+}
+
+/**
+ * Generates requests for a whole horizon: `days` days × `nPerDay` trucks.
+ * Each day gets its own seed (seed + day * 101) so days differ but the
+ * horizon is fully deterministic. Request ids are namespaced per day
+ * (REQ-D1-0001) and each request carries its `day` offset.
+ */
+export function generateWeekRequests(
+  nPerDay: number,
+  seed: number,
+  days: number = 7,
+): BookingRequest[] {
+  const out: BookingRequest[] = [];
+  for (let day = 0; day < days; day += 1) {
+    const dayReqs = generateDayRequests(nPerDay, seed + day * 101);
+    for (const r of dayReqs) {
+      out.push({
+        ...r,
+        id: `REQ-D${day + 1}-${r.id.replace('REQ-', '')}`,
+        day,
+      });
+    }
+  }
+  return out;
 }
