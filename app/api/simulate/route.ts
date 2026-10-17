@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { guardRequest, internalError } from "@/lib/server/api-guard";
 import { simulateDay, simulateWeek } from '@/lib/simulation';
 import type { ScenarioResult, OptimizerMethod } from '@/lib/types';
 import { HORIZON_DAYS } from '@/lib/types';
@@ -63,16 +64,9 @@ function readFiniteNumber(source: Record<string, unknown>, key: string): number 
 
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    let body: unknown = {};
-
-    const rawBody = await request.text();
-    if (rawBody.trim() !== '') {
-      try {
-        body = JSON.parse(rawBody) as unknown;
-      } catch {
-        return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
-      }
-    }
+    const guard = await guardRequest(request, "simulate");
+    if (!guard.ok) return guard.response;
+    const body: unknown = guard.body;
 
     if (body !== null && body !== undefined && !isRecord(body)) {
       return NextResponse.json(
@@ -110,12 +104,13 @@ export async function POST(request: Request): Promise<NextResponse> {
 
     return NextResponse.json(result, { status: 200 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unexpected error while simulating day';
-    return NextResponse.json({ error: message }, { status: 500 });
+    return internalError("POST /api/simulate", error);
   }
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: Request): Promise<NextResponse> {
+  const guard = await guardRequest(request, "simulate");
+  if (!guard.ok) return guard.response;
   const docs: SimulateDocs = {
     description:
       'Runs a deterministic simulation for a given number of trucks and a random seed. days=1 (default) returns a single-day ScenarioResult (baseline vs optimized). days=2..7 returns a WeekResult: one ScenarioResult per horizon day plus aggregated horizon totals. method selects the optimizer used for the optimized world: greedy (default) or annealed (greedy + local search + simulated annealing).',

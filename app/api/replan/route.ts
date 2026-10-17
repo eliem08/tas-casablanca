@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { guardRequest, internalError } from "@/lib/server/api-guard";
 import { replanDay } from "@/lib/replan";
 import {
   validateBookingRequest,
@@ -28,12 +29,9 @@ const MAX_ITEMS = 1000;
  */
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-    }
+    const guard = await guardRequest(request, "replan");
+    if (!guard.ok) return guard.response;
+    const body: unknown = guard.body;
     if (typeof body !== "object" || body === null || Array.isArray(body)) {
       return NextResponse.json({ error: "Body must be an object" }, { status: 400 });
     }
@@ -105,14 +103,13 @@ export async function POST(request: Request): Promise<NextResponse> {
 
     return NextResponse.json(result);
   } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : "Replanning failed" },
-      { status: 500 },
-    );
+    return internalError("POST /api/replan", e);
   }
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: Request): Promise<NextResponse> {
+  const guard = await guardRequest(request, "replan");
+  if (!guard.ok) return guard.response;
   return NextResponse.json({
     description: `Live replanning: freeze confirmed slots, drop no-shows, re-place late trucks, re-optimize the rest of the day. Horizon days are 0..${HORIZON_DAYS - 1}.`,
     method: "POST",

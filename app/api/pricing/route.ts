@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { guardRequest, internalError } from "@/lib/server/api-guard";
 import { generateDayRequests } from "@/lib/data";
 import { applyCongestionPricing } from "@/lib/pricing";
 import { HORIZON_DAYS } from "@/lib/types";
@@ -14,15 +15,9 @@ export const dynamic = "force-dynamic";
  */
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    let body: Record<string, unknown> = {};
-    const raw = await request.text();
-    if (raw.trim() !== "") {
-      try {
-        body = JSON.parse(raw) as Record<string, unknown>;
-      } catch {
-        return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-      }
-    }
+    const guard = await guardRequest(request, "pricing");
+    if (!guard.ok) return guard.response;
+    const body = (guard.body ?? {}) as Record<string, unknown>;
     const trucks =
       typeof body.trucks === "number" && Number.isFinite(body.trucks)
         ? Math.max(1, Math.min(600, Math.trunc(body.trucks)))
@@ -74,14 +69,13 @@ export async function POST(request: Request): Promise<NextResponse> {
       avgPricePaid: result.avgPricePaid,
     });
   } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : "Pricing experiment failed" },
-      { status: 500 },
-    );
+    return internalError("POST /api/pricing", e);
   }
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: Request): Promise<NextResponse> {
+  const guard = await guardRequest(request, "pricing");
+  if (!guard.ok) return guard.response;
   return NextResponse.json({
     description:
       "Congestion-pricing mechanism experiment: time-of-day + load-based slot prices shift carrier demand; the terminal re-optimizes and reports peak flattening + revenue. Illustrative only — not a real tariff proposal.",

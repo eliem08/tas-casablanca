@@ -10,6 +10,10 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: npm }
       - run: npm ci
+      # Fail on high/critical vulnerabilities. Threshold choice: "high" —
+      # moderate/low advisories are noisy for a demo repo and are handled
+      # by the weekly Dependabot PRs instead; high/critical must block.
+      - run: npm audit --audit-level=high
       - run: npm run typecheck
       - run: npm run lint --if-present
       - run: npm test

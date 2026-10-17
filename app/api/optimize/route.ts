@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { guardRequest, internalError } from "@/lib/server/api-guard";
 import {
   optimizeSlots,
   scorePlan,
@@ -30,12 +31,9 @@ function validateRequest(v: unknown, i: number): string | null {
 
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-    }
+    const guard = await guardRequest(request, "optimize");
+    if (!guard.ok) return guard.response;
+    const body: unknown = guard.body;
     if (!isRecord(body) || !Array.isArray(body.requests)) {
       return NextResponse.json(
         { error: 'Body must be an object with a "requests" array' },
@@ -108,14 +106,13 @@ export async function POST(request: Request): Promise<NextResponse> {
       },
     });
   } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : "Optimization failed" },
-      { status: 500 },
-    );
+    return internalError("POST /api/optimize", e);
   }
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: Request): Promise<NextResponse> {
+  const guard = await guardRequest(request, "optimize");
+  if (!guard.ok) return guard.response;
   return NextResponse.json({
     description:
       "Assigns gate/time slots to truck booking requests. Methods: 'greedy' (greedy + local search, default) or 'annealed' (greedy + local search + simulated annealing — never worse than greedy on the shared cost function). Deterministic (seed 7), overbooking enabled. Times are minutes since midnight. All requests in one call must share the same horizon day (0..6).",
