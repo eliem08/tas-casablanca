@@ -319,8 +319,8 @@ This section separates **software correctness** (tested) from
 Full criteria: `docs/ACCEPTANCE.md`. Frank limitations:
 `docs/LIMITATIONS.md`. Measured performance: `docs/PERFORMANCE.md`.
 
-**Test suite** (run `npm test`): 305 tests across 29 test files, all
-passing (suite wall clock ~93 s, dominated by the exact-solver and fuzz
+**Test suite** (run `npm test`): 301 tests across 27 test files, all
+passing (suite wall clock ~90 s, dominated by the exact-solver and fuzz
 tests); `npm run typecheck` clean; `npm run lint` clean; `npm run build`
 succeeds. Property-based tests use a seeded PRNG (mulberry32,
 `tests/phase-d-helpers.ts`) — every randomized test replays from its
