@@ -214,10 +214,66 @@ function rebuildLoads(placed: Placed[], base?: number[][]): number[][] {
 }
 
 /** Capacity for a gate/slot, optionally inflated by overbooking. */
-function capacityFor(gate: GateId, overbookFactor: number): number {
+export function slotCapacity(gate: GateId, overbookFactor: number): number {
   const base = capacityForGate(gate);
   if (overbookFactor <= 1) return base;
   return Math.min(Math.ceil(base * overbookFactor), base * 2);
+}
+
+/**
+ * The no-show-aware overbooking factor for a demand set: ceil(1 / show-up
+ * rate) capped at 2x. Extracted so the API layer can report overloads
+ * against the same inflated capacity the optimizer used.
+ */
+export function overbookFactorFor(requests: BookingRequest[]): number {
+  if (requests.length === 0) return 1;
+  const avg =
+    requests.reduce(
+      (s, r) =>
+        s +
+        noShowProbability({
+          leadTimeHours: r.leadTimeHours,
+          driverNoShowRate: r.driverNoShowRate,
+          slotStartMin: r.preferredStart,
+          cargo: r.cargo,
+        }),
+      0,
+    ) / requests.length;
+  return overbookLimit(1, avg); // 1 -> inflated unit factor
+}
+
+export interface SlotOverload {
+  gate: GateId;
+  slotStart: number;
+  load: number;
+  capacity: number;
+}
+
+/**
+ * Slots where a finished plan exceeds (possibly overbook-inflated)
+ * capacity. Empty under normal demand; non-empty exactly when the
+ * optimizer's extreme-overload fallback spilled trucks onto full slots
+ * rather than dropping them. The /api/optimize summary surfaces the count
+ * so overloads are visible instead of silent.
+ */
+export function findOverloads(
+  assignments: SlotAssignment[],
+  overbookFactor = 1,
+): SlotOverload[] {
+  const loads = new Map<string, { gate: GateId; slotStart: number; load: number }>();
+  for (const a of assignments) {
+    const k = `${a.gate}:${a.slotStart}`;
+    const e = loads.get(k);
+    if (e) e.load += 1;
+    else loads.set(k, { gate: a.gate, slotStart: a.slotStart, load: 1 });
+  }
+  const out: SlotOverload[] = [];
+  for (const e of loads.values()) {
+    const capacity = slotCapacity(e.gate, overbookFactor);
+    if (e.load > capacity) out.push({ ...e, capacity });
+  }
+  out.sort((a, b) => b.load - b.capacity - (a.load - a.capacity));
+  return out;
 }
 
 /**
@@ -233,23 +289,7 @@ export function optimizeSlots(
   const rng = makeRng(opts.seed ?? 7);
 
   // Overbooking factor from expected no-shows (same for every gate).
-  let overbookFactor = 1;
-  if (opts.overbook) {
-    const avg =
-      requests.reduce(
-        (s, r) =>
-          s +
-          noShowProbability({
-            leadTimeHours: r.leadTimeHours,
-            driverNoShowRate: r.driverNoShowRate,
-            slotStartMin: r.preferredStart,
-            cargo: r.cargo,
-          }),
-        0,
-      ) / requests.length;
-    overbookFactor = overbookLimit(1, avg); // 1 -> inflated unit factor
-    // overbookLimit(1, avg) returns ceil(1 / showUpRate) capped at 2.
-  }
+  const overbookFactor = opts.overbook ? overbookFactorFor(requests) : 1;
 
   // Frozen (blocked) loads count toward capacity from the start.
   const blockedLoads = emptyLoads();
@@ -285,7 +325,7 @@ export function optimizeSlots(
       const inWindow = s >= ws && s <= we;
       const penalty = inWindow ? 0 : RESCHEDULE_PENALTY;
       for (const g of GATE_IDS) {
-        const cap = capacityFor(g, overbookFactor);
+        const cap = slotCapacity(g, overbookFactor);
         if (loads[g][s] >= cap) continue;
         const termPenalty =
           terminalGate !== null && terminalGate !== g
@@ -339,7 +379,7 @@ export function optimizeSlots(
     p.slot = newS;
     loads[newG][newS] += 1;
 
-    const cap = capacityFor(newG, overbookFactor);
+    const cap = slotCapacity(newG, overbookFactor);
     const after = totalCost(placed, loads, weights);
     if (!(after < before - 1e-9) || loads[newG][newS] > cap) {
       // revert: no improvement, or the move broke slot capacity
@@ -353,7 +393,7 @@ export function optimizeSlots(
   // Simulated annealing: random single-truck moves, uphill moves accepted
   // with probability exp(-Δ/T) under geometric cooling. Best-seen wins.
   if (opts.method === 'annealed' && placed.length > 0) {
-    const capOf = (g: GateId) => capacityFor(g, overbookFactor);
+    const capOf = (g: GateId) => slotCapacity(g, overbookFactor);
     const state = placed.map((p) => ({ ...p }));
     // Capacity violations get a steep penalty inside the SA cost so the
     // search steers away from infeasible states instead of discovering them

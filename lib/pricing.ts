@@ -18,8 +18,8 @@
  *
  * Mechanism, precisely:
  *  • Slot price:  p(g,s) = P0 · tier(s) · (1 + σ · loadFactor(g,s))
- *    where tier(s) is a time-of-day multiplier (peak 1.6, shoulder 1.15,
- *    off-peak 0.7) and loadFactor is the slot's load / capacity in the
+ *    where tier(s) is a time-of-day multiplier (peak 1.8, shoulder 1.15,
+ *    off-peak 0.6) and loadFactor is the slot's load / capacity in the
  *    base (unpriced) plan.
  *  • Carrier choice: each truck picks the slot minimizing generalized
  *    cost  p + VoT_i · displacement / 60, searching ±maxShift minutes

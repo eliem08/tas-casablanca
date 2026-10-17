@@ -154,7 +154,12 @@ export const FORMULATION: FormulationBlock[] = [
     heading: "Constraints",
     lines: [
       "(C1) Assignment — every request gets exactly one slot: Σ_{g,s} x_{i,g,s} = 1 for all i.",
-      "(C2) Capacity — no slot exceeds its gate capacity: L_{g,s} ≤ c_{g,s} for all g, s.",
+      "(C2) Capacity — no slot exceeds its gate capacity: L_{g,s} ≤ c_{g,s} for all g, s. " +
+        "QUALIFICATION: C2 holds whenever total demand fits total capacity. Under extreme overload " +
+        "(demand > capacity, or adversarial blocked input) the optimizer's documented fallback spills " +
+        "trucks onto the least-loaded slots rather than dropping them, so C2 can be violated — " +
+        "lib/optimizer.ts findOverloads() reports exactly which slots overflow, and /api/optimize " +
+        "surfaces the count as summary.overflowSlots.",
       "(C3) Time feasibility — assignments use slots within the operating day (and never before 'now' in replanning).",
       "(C4) Integrality — x_{i,g,s} ∈ {0,1}. (The demo never splits a truck across slots.)",
     ],

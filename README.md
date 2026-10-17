@@ -232,9 +232,23 @@ Assign slots to booking requests.
 }
 ```
 
-Response: `{ assignments: [...], method, summary: { total, rescheduled, rescheduleRate, avgNoShowRisk, optimizerCost, avgWaitMin, maxSlotLoad } }`.
+Response: `{ assignments: [...], method, summary: { total, rescheduled, rescheduleRate, avgNoShowRisk, optimizerCost, avgWaitMin, maxSlotLoad, overflowSlots } }`.
 
 Optional body field `method: "greedy" | "annealed"` selects the optimizer. Optional per-request fields: `day` (0..6, default 0), `terminal` (T1|T2|T3|any). All requests in one call must share the same day.
+
+**Concurrency model.** The route handlers are stateless: every request carries
+its full demand, the optimizer uses a fixed seed, and there is no
+module-level mutable store. Twenty rapid sequential calls return
+byte-identical plans (pinned in `tests/routes-hardening.test.ts`), so
+concurrent bookings cannot overbook or overwrite each other *within one
+server process*. Multi-instance limitation, stated honestly: capacity is
+enforced per call, not against a shared registry. Two instances (or two
+processes) optimizing overlapping demand have no shared ledger, so a
+production deployment that sells the *same physical slots* from several
+front-ends needs a transactional booking registry (row-level lock or
+compare-and-swap on slot inventory) in front of this optimizer. The demo
+does not implement one — the optimizer is the allocation engine, not the
+system of record.
 
 ### POST /api/simulate
 ```json

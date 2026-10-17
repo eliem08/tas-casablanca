@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
 import { replanDay } from "@/lib/replan";
+import {
+  validateBookingRequest,
+  validateSlotAssignment,
+} from "@/lib/request-validation";
 import type {
   BookingRequest,
   SlotAssignment,
@@ -59,6 +63,16 @@ export async function POST(request: Request): Promise<NextResponse> {
         { error: "nowMin must be minutes since midnight (0..1439)" },
         { status: 400 },
       );
+    }
+    for (let i = 0; i < requests.length; i++) {
+      const err = validateBookingRequest(requests[i], i);
+      if (err)
+        return NextResponse.json({ error: err }, { status: 400 });
+    }
+    for (let i = 0; i < assignments.length; i++) {
+      const err = validateSlotAssignment(assignments[i], i);
+      if (err)
+        return NextResponse.json({ error: err }, { status: 400 });
     }
     for (let i = 0; i < disruptions.length; i++) {
       const d = disruptions[i] as Record<string, unknown>;
