@@ -312,6 +312,55 @@ Response: `{ window, meanQueue, avgWait, littlesLaw: { avgNumberInSystem, arriva
 ```
 Response: `{ basePeakLoad, pricedPeakLoad, peakReductionPct, revenue, shiftedCount, avgDisplacementMin, avgPricePaid }` — congestion-pricing mechanism experiment. Illustrative only.
 
+## Validation — what was actually tested (Phase D)
+
+This section separates **software correctness** (tested) from
+**real-world accuracy** (untested — no operational data exists).
+Full criteria: `docs/ACCEPTANCE.md`. Frank limitations:
+`docs/LIMITATIONS.md`. Measured performance: `docs/PERFORMANCE.md`.
+
+**Test suite** (run `npm test`): 305 tests across 29 test files, all
+passing (suite wall clock ~93 s, dominated by the exact-solver and fuzz
+tests); `npm run typecheck` clean; `npm run lint` clean; `npm run build`
+succeeds. Property-based tests use a seeded PRNG (mulberry32,
+`tests/phase-d-helpers.ts`) — every randomized test replays from its
+seed.
+
+What the tests prove:
+
+- **Optimizer correctness** — `tests/phase-d-property.test.ts`: randomized
+  instances (8 seeds × greedy/annealed × spread/tight windows) satisfy
+  capacity, no-double-booking, slot alignment, terminal/gate consistency,
+  and the wait formula; annealed never scores worse than greedy.
+- **Exact solver honesty** — an *independent* brute-force implementation
+  (written from scratch, no shared code with `lib/exact.ts`) agrees with
+  the solver on wider shapes than before: n≤4 exhaustive over random
+  seeds/windows plus n=5 sampled instances. Infeasible instances return
+  `feasible:false` — never a certified "optimal" plan.
+- **Replanning safety** — confirmed (frozen) bookings survive replanning
+  byte-identical across randomized disruption scenarios; replanned trucks
+  are never placed in the past.
+- **Idempotency** — replaying an `Idempotency-Key` returns the identical
+  response with exactly one entity created (bookings + recommendations).
+- **Malformed input** — ~700 seeded garbage/edge payloads across all 14
+  endpoints: always 4xx with a machine-readable `{ error }`, never 5xx,
+  never silent acceptance of malformed input on required-field routes.
+
+What the tests do **not** prove:
+
+- **Nothing about the real port.** Gate service times (4/5/8 min), the
+  no-show curve, arrival distributions, and queue dynamics are invented
+  or guessed. `lib/datasets/schemas.ts` defines versioned schemas for the
+  four real datasets needed (truck arrivals, appointment adherence, gate
+  service times, queue measurements) — what the terminal operator / ANP
+  would have to provide. The fixtures in `fixtures/synthetic/` are
+  hand-written, flagged `"synthetic": true`, and prove schema
+  conformance only.
+- **The demo is not production.** In-memory stores (data lost on
+  restart), mock auth (`x-demo-role` header), per-process rate limiting,
+  and non-atomic idempotency under concurrency — all documented in
+  `docs/LIMITATIONS.md` as gates for anything beyond a supervised pilot.
+
 ## Screenshots
 
 Captured from the live demo at https://tas-casablanca-eliem08s-projects.vercel.app:

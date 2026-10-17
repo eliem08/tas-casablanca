@@ -66,6 +66,7 @@ them for regressions:
 
 ## Full test-suite wall clock
 
-Recorded at the end of Phase D — see the final report / run
-`npm test` yourself. (Suite time is dominated by the exact-solver and
-fuzz tests; the property tests themselves run in ~3 s.)
+305 tests / 29 files, all passing: ~93 s on the dev VM
+(`npm test`; dominated by the exact-solver and fuzz tests — the
+property tests themselves run in ~3 s). `npm run typecheck`, `npm run
+lint`, and `npm run build` all clean.
