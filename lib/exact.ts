@@ -32,6 +32,17 @@
  * Scope: single-day demand, no overbooking by default (capacity = base
  * per-gate capacity). Blocked (frozen) loads and earliestSlotStart are
  * supported so replanning can use the exact solver on the remaining day.
+ *
+ * Blocked-load cost accounting (known nuance): the branch-and-bound search
+ * optimizes the blocked-INCLUSIVE cost (frozen loads contribute to peak and
+ * wait terms — the correct objective for search). The reported `cost` is
+ * identical to scorePlan whenever `blocked` is empty (the case for every
+ * current caller). With non-empty `blocked`, the "incumbent is optimal"
+ * return path reports the blocked-exclusive scorePlan cost while a newly
+ * found optimum reports the blocked-inclusive cost — the two paths can
+ * differ by the constant frozen-load offset. Search correctness and the
+ * feasibility guarantee are unaffected; only cross-path cost comparison
+ * with blocked loads needs the offset in mind.
  */
 
 import type {
@@ -188,18 +199,23 @@ export function exactOptimize(
   }
 
   // Greedy incumbent (same options, default method). If the greedy plan
-  // somehow violates capacity (its overflow fallback — unreachable for
-  // n ≤ 12 on realistic input), it is NOT a valid incumbent.
+  // violates capacity (its overflow fallback — e.g. adversarial blocked
+  // input filling every slot), it is NOT a valid incumbent.
   const incumbent = optimizeSlots(requests, {
     seed: opts.seed ?? 7,
     overbook: opts.overbook,
     blocked: opts.blocked,
     earliestSlotStart: opts.earliestSlotStart,
   });
-  const incumbentLoads = emptyLoads();
+  const incumbentLoads = blockedLoads.map((row) => [...row]);
   for (const a of incumbent) {
     incumbentLoads[a.gate][startToSlotIndex(a.slotStart)] += 1;
   }
+  // NOTE: blocked (frozen) loads MUST be included here. The greedy plan is
+  // only a valid incumbent when it respects capacity *on top of* the frozen
+  // loads; checking the fresh assignments alone wrongly certified an
+  // infeasible incumbent as a proven optimum on a fully-blocked day
+  // (regression test: tests/exact-hardening.test.ts).
   let incumbentFeasible = true;
   for (const g of GATE_IDS) {
     for (let s = 0; s < SLOTS_PER_GATE; s++) {

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { guardRequest, internalError } from "@/lib/server/api-guard";
 import { generateDayRequests } from "@/lib/data";
 import { compareAgainstExact, EXACT_MAX_TRUCKS } from "@/lib/exact";
 import { HORIZON_DAYS } from "@/lib/types";
@@ -12,15 +13,9 @@ export const dynamic = "force-dynamic";
  */
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    let body: Record<string, unknown> = {};
-    const raw = await request.text();
-    if (raw.trim() !== "") {
-      try {
-        body = JSON.parse(raw) as Record<string, unknown>;
-      } catch {
-        return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-      }
-    }
+    const guard = await guardRequest(request, "exact");
+    if (!guard.ok) return guard.response;
+    const body = (guard.body ?? {}) as Record<string, unknown>;
     const trucks =
       typeof body.trucks === "number" && Number.isFinite(body.trucks)
         ? Math.max(1, Math.trunc(body.trucks))
@@ -67,14 +62,13 @@ export async function POST(request: Request): Promise<NextResponse> {
       annealed: { cost: round2(cmp.annealed.cost), gapPct: round2(cmp.annealed.gapPct) },
     });
   } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : "Exact comparison failed" },
-      { status: 500 },
-    );
+    return internalError("POST /api/exact", e);
   }
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: Request): Promise<NextResponse> {
+  const guard = await guardRequest(request, "exact");
+  if (!guard.ok) return guard.response;
   return NextResponse.json({
     description:
       "Branch-and-bound exact optimum vs greedy vs annealing on a small instance (n <= 12). Gaps are (heuristic - optimum) / optimum in %.",

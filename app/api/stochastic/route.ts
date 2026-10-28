@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { guardRequest, internalError } from "@/lib/server/api-guard";
 import { generateDayRequests } from "@/lib/data";
 import { stochasticPlan } from "@/lib/stochastic";
 import { HORIZON_DAYS } from "@/lib/types";
@@ -15,15 +16,9 @@ export const dynamic = "force-dynamic";
  */
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    let body: Record<string, unknown> = {};
-    const raw = await request.text();
-    if (raw.trim() !== "") {
-      try {
-        body = JSON.parse(raw) as Record<string, unknown>;
-      } catch {
-        return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-      }
-    }
+    const guard = await guardRequest(request, "stochastic");
+    if (!guard.ok) return guard.response;
+    const body = (guard.body ?? {}) as Record<string, unknown>;
     const trucks =
       typeof body.trucks === "number" && Number.isFinite(body.trucks)
         ? Math.max(1, Math.min(600, Math.trunc(body.trucks)))
@@ -77,14 +72,13 @@ export async function POST(request: Request): Promise<NextResponse> {
       chosen: slim(result.chosen),
     });
   } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : "Stochastic planning failed" },
-      { status: 500 },
-    );
+    return internalError("POST /api/stochastic", e);
   }
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: Request): Promise<NextResponse> {
+  const guard = await guardRequest(request, "stochastic");
+  if (!guard.ok) return guard.response;
   return NextResponse.json({
     description:
       "Sample Average Approximation under no-show uncertainty: candidate-set search with a chance constraint P(any slot overflows) <= alpha. Evaluation over sampled scenarios is exact; the search is heuristic.",
