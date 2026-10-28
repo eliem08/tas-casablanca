@@ -54,10 +54,22 @@ function isRole(v: string): v is Role {
  * paths. Because the header is client-controlled, this provider must
  * never be used in production.
  */
+/**
+ * Demo auth is allowed outside production, or in production only with the
+ * explicit opt-in ENABLE_DEMO_AUTH=true (e.g. a public demo deployment).
+ * Evaluated per call so tests can toggle it.
+ */
+export function demoAuthEnabled(): boolean {
+  return process.env.NODE_ENV !== "production" || process.env.ENABLE_DEMO_AUTH === "true";
+}
+
 export class DevMockAuthProvider implements AuthProvider {
   private readonly userId = "demo-operator";
 
   async getAuthContext(req: Request): Promise<AuthContext> {
+    // Fail closed: in production without explicit opt-in, the client-controlled
+    // x-demo-role header is ignored and the caller holds no roles at all.
+    if (!demoAuthEnabled()) return { userId: "anonymous", roles: [] };
     const raw = req.headers.get("x-demo-role")?.trim().toLowerCase();
     const roles: Role[] = ["viewer", "planner"];
     if (raw && isRole(raw)) {

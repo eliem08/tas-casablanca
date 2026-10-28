@@ -95,3 +95,19 @@ evidence that would resolve each item. Read alongside
     UI copy, disruption kinds (`no-show` / `late`), and the approval
     flow were designed without operator input. A supervised pilot
     (B5) is as much a UX validation as a model validation.
+
+
+## Security, dependencies and production readiness (verified 2026-10-28)
+
+**Dependency audit.** `npm audit` reports 0 vulnerabilities (all severities) on the lockfile at the commit that introduced this section. CI runs `npm audit --audit-level=high` as a **blocking** step with **no exceptions**; a second step prints the full report. If an unfixable advisory ever has to be tolerated, it must be listed here with advisory ID, affected environment, mitigation, expiry and follow-up, and gated by ID in CI, not by turning the audit into a warning.
+
+**Not production-ready.** A green CI run is not evidence of production readiness. Missing before any real deployment: real-data validation, a durable shared store, a real identity provider with verified credentials, operational monitoring, backup/recovery, and an authorized staging validation. Nothing in this repository has been connected to a real port, TOS, gate controller or production service.
+
+**Feature status.**
+
+| Feature | Status |
+|---|---|
+| Request validation, idempotency, audit log, rate limiting, RBAC checks | Implemented and tested, **process-local, in-memory only** (lost on restart, not shared across instances; a second instance would not see the first one's idempotency keys, capacity counts or audit trail) |
+| Authentication | **Demo only.** `DevMockAuthProvider` takes roles from the client-controlled `x-demo-role` header. Since this review it **fails closed in production** (`NODE_ENV=production` gives no roles, so approvals return 403) unless `ENABLE_DEMO_AUTH=true` is set explicitly. A real `AuthProvider` is still a placeholder. |
+| Durable persistence | Not implemented |
+| Concurrency | Verified for a single process: 20 concurrent same-key requests create one booking; 30 concurrent distinct requests never exceed slot capacity. Cross-instance consistency is not provided. |
