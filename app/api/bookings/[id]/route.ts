@@ -29,8 +29,9 @@ const PatchBody = z
  */
 export async function GET(
   request: Request,
-  { params }: { params: { id: string } },
+  { params: paramsPromise }: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
+  const params = await paramsPromise;
   const guard = await guardRequest(request, "bookings");
   if (!guard.ok) return guard.response;
   try {
@@ -53,8 +54,9 @@ export async function GET(
  */
 export async function PATCH(
   request: Request,
-  { params }: { params: { id: string } },
+  { params: paramsPromise }: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
+  const params = await paramsPromise;
   const guard = await guardRequest(request, "bookings");
   if (!guard.ok) return guard.response;
 

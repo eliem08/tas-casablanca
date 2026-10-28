@@ -319,14 +319,14 @@ describe("/api/bookings/[id]", () => {
     const { body } = await createBooking();
     const res = await bookingGET(
       new Request("http://localhost/api/bookings/x"),
-      { params: { id: String(body.id) } },
+      { params: Promise.resolve({ id: String(body.id) }) },
     );
     expect(res.status).toBe(200);
     expect(((await res.json()) as Record<string, unknown>).id).toBe(body.id);
 
     const missing = await bookingGET(
       new Request("http://localhost/api/bookings/nope"),
-      { params: { id: "appt_doesnotexist00000000000001" } },
+      { params: Promise.resolve({ id: "appt_doesnotexist00000000000001" }) },
     );
     expect(missing.status).toBe(404);
   });
@@ -342,7 +342,7 @@ describe("/api/bookings/[id]", () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify(payload),
         }),
-        { params: { id } },
+        { params: Promise.resolve({ id }) },
       );
 
     const ok = await patch({ status: "confirmed", reason: "carrier accepted" });
@@ -370,7 +370,7 @@ describe("/api/bookings/[id]", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ status: "cancelled", reason: "carrier withdrew" }),
       }),
-      { params: { id: first.id } },
+      { params: Promise.resolve({ id: first.id }) },
     );
     expect(res.status).toBe(200);
 
@@ -413,7 +413,7 @@ describe("recommendations + RBAC", () => {
         headers: { "content-type": "application/json", ...headers },
         body: JSON.stringify({ decision: "approve", reason: "dispatcher sign-off" }),
       }),
-      { params: { id } },
+      { params: Promise.resolve({ id }) },
     );
   }
 
@@ -463,7 +463,7 @@ describe("recommendations + RBAC", () => {
         headers: { "content-type": "application/json", "x-demo-role": "approver" },
         body: JSON.stringify({ decision: "reject" }),
       }),
-      { params: { id } },
+      { params: Promise.resolve({ id }) },
     );
     expect(res.status).toBe(400);
     expect(((await res.json()) as Record<string, unknown>).error).toBe("validation_failed");

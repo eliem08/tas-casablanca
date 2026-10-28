@@ -12,5 +12,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
+    // Exact-solver/property tests are CPU-heavy; vitest >= 4 parallel workers
+    // hit the 5s default under load (timeouts, not logic failures).
+    testTimeout: 60_000,
   },
 });

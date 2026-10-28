@@ -46,7 +46,7 @@ import {
 } from "../lib/server/idempotency";
 import { makeTestRng, type Rng } from "./phase-d-helpers";
 
-type Handler = (r: Request, ctx?: { params: { id: string } }) => Promise<Response>;
+type Handler = (r: Request, ctx?: { params: Promise<{ id: string }> }) => Promise<Response>;
 
 function deepNested(rng: Rng, depth: number): unknown {
   if (depth <= 0) return rng.pick(["x", 1, true, null] as const);
@@ -120,7 +120,7 @@ async function call(
     }),
     // Next.js dynamic routes always receive { params }; the test harness
     // must pass it explicitly or the handler's destructuring throws.
-    init?.params ? { params: init.params } : { params: { id: "unused" } },
+    init?.params ? { params: Promise.resolve(init.params) } : { params: Promise.resolve({ id: "unused" }) },
   );
   let json: unknown = null;
   try {

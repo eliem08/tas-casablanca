@@ -34,8 +34,9 @@ const ApproveBody = z
  */
 export async function POST(
   request: Request,
-  { params }: { params: { id: string } },
+  { params: paramsPromise }: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
+  const params = await paramsPromise;
   const guard = await guardRequest(request, "recommendations");
   if (!guard.ok) return guard.response;
 
